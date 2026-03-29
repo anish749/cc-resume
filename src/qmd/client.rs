@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use thiserror::Error;
 use tokio::process::Command;
 
 use crate::config::Config;
+
+const QMD_MCP_URL: &str = "http://localhost:8181/mcp";
 
 #[derive(Debug, Error)]
 pub enum QmdError {
@@ -14,14 +17,23 @@ pub enum QmdError {
 
     #[error("QMD command `qmd {command}` failed:\n{stderr}")]
     CommandFailed { command: String, stderr: String },
+
+    #[error("QMD daemon is not running. Run `claude-resume daemon start` first.")]
+    DaemonNotRunning,
+
+    #[error("QMD search failed: {0}")]
+    SearchFailed(String),
 }
 
-/// A wrapper around the QMD CLI for semantic search over exported markdown sessions.
+/// A wrapper around the QMD MCP daemon for semantic search.
 pub struct QmdClient {
     config: Config,
+    http: reqwest::Client,
+    /// MCP session ID, lazily initialized on first search.
+    session_id: Mutex<Option<String>>,
 }
 
-/// A single search result from QMD, enriched with frontmatter metadata.
+/// A single search result enriched with frontmatter metadata.
 #[derive(Debug, Clone, Default)]
 pub struct SearchResult {
     pub score: f64,
@@ -38,6 +50,8 @@ impl QmdClient {
     pub fn new(config: &Config) -> Self {
         Self {
             config: config.clone(),
+            http: reqwest::Client::new(),
+            session_id: Mutex::new(None),
         }
     }
 
@@ -70,7 +84,6 @@ impl QmdClient {
     }
 
     /// Check whether the collection points at the expected export directory.
-    /// QMD's `collection list` output includes the path in the description line.
     async fn collection_path_matches(&self) -> Result<bool> {
         let export_dir = self.config.export_dir();
         let output = Command::new("qmd")
@@ -89,7 +102,6 @@ impl QmdClient {
     }
 
     /// Ensure the QMD collection exists and points at the correct export directory.
-    /// Removes and recreates the collection if the path is stale.
     pub async fn ensure_collection(&self) -> Result<()> {
         let collection_name = self.config.qmd_collection_name();
         let export_dir = self.config.export_dir();
@@ -102,7 +114,6 @@ impl QmdClient {
                 tracing::debug!("QMD collection '{collection_name}' already exists with correct path");
                 return Ok(());
             }
-            // Collection exists but points at the wrong path — remove it.
             tracing::info!("QMD collection '{collection_name}' points at wrong path, recreating");
             run_qmd_command(&["collection", "remove", collection_name]).await?;
         }
@@ -144,25 +155,23 @@ impl QmdClient {
         run_qmd_command(&["embed"]).await
     }
 
-    /// Hybrid search via `qmd query` — query expansion + reranking.
-    /// Fast (~0.3s) when QMD daemon is running, slow (~20s) cold.
-    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.run_search("query", query, limit).await
-    }
-
     /// Check if the QMD HTTP daemon is running.
     pub async fn is_daemon_running(&self) -> bool {
-        Command::new("qmd")
-            .args(["mcp", "status"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
+        self.http
+            .post(QMD_MCP_URL)
+            .header("Accept", "application/json, text/event-stream")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "ping",
+            }))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
             .await
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .is_ok()
     }
 
-    /// Start the QMD HTTP daemon for fast model-cached searches.
+    /// Start the QMD HTTP daemon.
     pub async fn start_daemon(&self) -> Result<()> {
         if self.is_daemon_running().await {
             return Ok(());
@@ -182,46 +191,128 @@ impl QmdClient {
         Ok(())
     }
 
-    async fn run_search(&self, subcommand: &str, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        let collection_name = self.config.qmd_collection_name();
-        let limit_str = limit.to_string();
-
-        tracing::debug!("Running: qmd {subcommand} {query:?} -c {collection_name} -n {limit_str}");
-
-        let output = Command::new("qmd")
-            .args([
-                subcommand,
-                query,
-                "-c",
-                collection_name,
-                "-n",
-                &limit_str,
-                "--json",
-            ])
-            .stdin(std::process::Stdio::null())
-            .output()
+    /// Initialize an MCP session with the daemon, returning the session ID.
+    async fn init_mcp_session(&self) -> Result<String> {
+        let resp = self
+            .http
+            .post(QMD_MCP_URL)
+            .header("Accept", "application/json, text/event-stream")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "claude-resume", "version": "0.1.0"}
+                }
+            }))
+            .send()
             .await
-            .with_context(|| format!("Failed to run `qmd {subcommand}`"))?;
+            .context("Failed to connect to QMD daemon")?;
 
-        tracing::debug!("qmd {subcommand} exited with status: {}", output.status);
+        let session_id = resp
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+            .ok_or_else(|| anyhow::anyhow!("QMD daemon did not return a session ID"))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stderr_lower = stderr.to_lowercase();
-            if stderr_lower.contains("collection") && stderr_lower.contains("not found") {
-                return Err(QmdError::CollectionNotFound(collection_name.into()).into());
+        tracing::debug!("MCP session initialized: {session_id}");
+        Ok(session_id)
+    }
+
+    /// Get or create an MCP session ID.
+    async fn get_session_id(&self) -> Result<String> {
+        {
+            let guard = self.session_id.lock().unwrap();
+            if let Some(ref id) = *guard {
+                return Ok(id.clone());
             }
-            return Err(QmdError::CommandFailed {
-                command: subcommand.into(),
-                stderr: stderr.into(),
-            }
-            .into());
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        tracing::debug!("qmd output: {} bytes", stdout.len());
+        let id = self.init_mcp_session().await?;
+        {
+            let mut guard = self.session_id.lock().unwrap();
+            *guard = Some(id.clone());
+        }
+        Ok(id)
+    }
+
+    /// Search via the QMD MCP daemon HTTP endpoint.
+    /// Uses the daemon's cached models for fast (~4s warm) hybrid search.
+    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let collection_name = self.config.qmd_collection_name();
+        let session_id = self.get_session_id().await.map_err(|e| {
+            tracing::warn!("Failed to get MCP session: {e}");
+            QmdError::DaemonNotRunning
+        })?;
+
+        tracing::debug!("MCP search: query={query:?} collection={collection_name} limit={limit}");
+
+        let resp = self
+            .http
+            .post(QMD_MCP_URL)
+            .header("Accept", "application/json, text/event-stream")
+            .header("Mcp-Session-Id", &session_id)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "query",
+                    "arguments": {
+                        "searches": [
+                            {"type": "lex", "query": query},
+                            {"type": "vec", "query": query}
+                        ],
+                        "intent": query,
+                        "collection": collection_name,
+                        "limit": limit
+                    }
+                }
+            }))
+            .send()
+            .await
+            .map_err(|e| QmdError::SearchFailed(format!("HTTP request failed: {e}")))?;
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| QmdError::SearchFailed(format!("Failed to parse response: {e}")))?;
+
+        tracing::debug!("MCP response received");
+
+        // Check for JSON-RPC error
+        if let Some(error) = body.get("error") {
+            let msg = error
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+
+            // Session might have expired — clear it and retry once
+            if msg.contains("session") || msg.contains("Session") {
+                tracing::debug!("MCP session expired, reinitializing");
+                {
+                    let mut guard = self.session_id.lock().unwrap();
+                    *guard = None;
+                }
+                // Don't retry here to avoid recursion — let the caller retry
+                return Err(QmdError::SearchFailed(format!("Session expired: {msg}")).into());
+            }
+
+            return Err(QmdError::SearchFailed(msg.to_string()).into());
+        }
+
+        // Extract results from MCP response.
+        // The response is: result.content[0].text = "Found N results...\n\n#docid score path - title\n..."
+        let text = body
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
         let export_dir = self.config.export_dir();
-        parse_search_results(&stdout, &export_dir)
+        parse_mcp_results(text, &export_dir)
     }
 }
 
@@ -247,37 +338,47 @@ async fn run_qmd_command(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Parse QMD JSON output into SearchResults, enriching each with frontmatter.
-fn parse_search_results(json_str: &str, export_dir: &Path) -> Result<Vec<SearchResult>> {
-    let raw_results: Vec<serde_json::Value> = match serde_json::from_str(json_str) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!("Failed to parse QMD JSON output: {e}");
-            return Ok(Vec::new());
+/// Parse the text output from QMD MCP query tool.
+/// Format: "Found N results for "query":\n\n#docid 92% collection/file.md - Title\n..."
+fn parse_mcp_results(text: &str, export_dir: &Path) -> Result<Vec<SearchResult>> {
+    let mut results = Vec::new();
+
+    for line in text.lines() {
+        // Lines look like: #docid 92% claude-sessions/file.md - Title
+        let line = line.trim();
+        if !line.starts_with('#') {
+            continue;
         }
-    };
 
-    let mut results = Vec::with_capacity(raw_results.len());
+        let parts: Vec<&str> = line.splitn(4, ' ').collect();
+        if parts.len() < 3 {
+            continue;
+        }
 
-    for raw in &raw_results {
-        let file_path = raw
-            .get("file")
-            .or_else(|| raw.get("displayPath"))
-            .or_else(|| raw.get("path"))
-            .and_then(|v| v.as_str())
-            .map(|uri| resolve_qmd_uri(uri, export_dir));
+        // parts[0] = "#docid", parts[1] = "92%", parts[2] = "collection/file.md", parts[3] = "- Title"
+        let score_str = parts[1].trim_end_matches('%');
+        let score = score_str.parse::<f64>().unwrap_or(0.0) / 100.0;
+
+        let qmd_path = parts[2];
+        // The path is like "claude-sessions/uuid.md" — resolve to filesystem
+        let file_path = export_dir
+            .join(
+                qmd_path
+                    .strip_prefix("claude-sessions/")
+                    .unwrap_or(qmd_path),
+            )
+            .to_string_lossy()
+            .to_string();
 
         let mut result = SearchResult {
-            score: raw
-                .get("score")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0),
-            file_path: file_path.clone(),
+            score,
+            file_path: Some(file_path.clone()),
             ..Default::default()
         };
 
-        if let Some(ref path) = file_path {
-            match parse_frontmatter(Path::new(path)) {
+        // Enrich with frontmatter
+        if Path::new(&file_path).exists() {
+            match parse_frontmatter(Path::new(&file_path)) {
                 Ok(fm) => {
                     result.session_id = fm.get("session_id").cloned();
                     result.project_path = fm.get("project_path").cloned();
@@ -287,7 +388,7 @@ fn parse_search_results(json_str: &str, export_dir: &Path) -> Result<Vec<SearchR
                     result.first_prompt = fm.get("first_prompt").cloned();
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to parse frontmatter from {path}: {e}");
+                    tracing::warn!("Failed to parse frontmatter from {file_path}: {e}");
                 }
             }
         }
@@ -299,11 +400,8 @@ fn parse_search_results(json_str: &str, export_dir: &Path) -> Result<Vec<SearchR
 }
 
 /// Resolve a QMD URI like `qmd://claude-sessions/foo.md` to a filesystem path.
-/// Falls back to returning the input as-is if it's already a real path.
 fn resolve_qmd_uri(uri: &str, export_dir: &Path) -> String {
-    // QMD URIs look like: qmd://collection-name/relative/path.md
     if let Some(rest) = uri.strip_prefix("qmd://") {
-        // Strip the collection name (first path segment)
         if let Some((_collection, relative)) = rest.split_once('/') {
             return export_dir.join(relative).to_string_lossy().to_string();
         }
@@ -312,9 +410,6 @@ fn resolve_qmd_uri(uri: &str, export_dir: &Path) -> String {
 }
 
 /// Parse YAML-style frontmatter from a markdown file.
-///
-/// Expects the file to start with `---`, followed by `key: value` lines,
-/// closed by another `---`. Returns a map of key-value pairs.
 fn parse_frontmatter(path: &Path) -> Result<HashMap<String, String>> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
@@ -453,5 +548,35 @@ first_prompt: 'Build the TUI'
         assert_eq!(fm.get("first_prompt").unwrap(), "Build the TUI");
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_parse_mcp_results() {
+        let text = r#"Found 3 results for "database":
+
+#6ada51 92% claude-sessions/abc-123.md - Session: 2026-03-03 (abc123)
+#ad31cc 50% claude-sessions/def-456.md - Session: 2026-03-28 (def456)
+#720521 44% claude-sessions/ghi-789.md - Session: 2026-03-27 (ghi789)"#;
+
+        let dir = std::env::temp_dir().join("mcp_parse_test");
+        let results = parse_mcp_results(text, &dir).unwrap();
+        assert_eq!(results.len(), 3);
+        assert!((results[0].score - 0.92).abs() < 0.01);
+        assert!((results[1].score - 0.50).abs() < 0.01);
+        assert!((results[2].score - 0.44).abs() < 0.01);
+        assert!(results[0].file_path.as_ref().unwrap().contains("abc-123.md"));
+    }
+
+    #[test]
+    fn test_resolve_qmd_uri() {
+        let export_dir = Path::new("/home/user/.ccresume/sessions");
+        assert_eq!(
+            resolve_qmd_uri("qmd://claude-sessions/abc.md", export_dir),
+            "/home/user/.ccresume/sessions/abc.md"
+        );
+        assert_eq!(
+            resolve_qmd_uri("/already/a/path.md", export_dir),
+            "/already/a/path.md"
+        );
     }
 }
