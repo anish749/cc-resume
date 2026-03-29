@@ -69,45 +69,20 @@ impl QmdClient {
         Ok(stdout.contains(collection_name))
     }
 
-    /// Check whether the collection points at the expected export directory.
-    /// QMD's `collection list` output includes the path in the description line.
-    async fn collection_path_matches(&self) -> Result<bool> {
-        let export_dir = self.config.export_dir();
-        let output = Command::new("qmd")
-            .args(["collection", "list"])
-            .output()
-            .await
-            .context("Failed to run `qmd collection list`")?;
-
-        if !output.status.success() {
-            return Ok(false);
+    /// Ensure the QMD collection exists, creating it if necessary.
+    pub async fn ensure_collection(&self) -> Result<()> {
+        if self.collection_exists().await? {
+            tracing::debug!("QMD collection '{}' already exists", self.config.qmd_collection_name());
+            return Ok(());
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let export_dir_str = export_dir.to_string_lossy();
-        Ok(stdout.contains(export_dir_str.as_ref()))
-    }
-
-    /// Ensure the QMD collection exists and points at the correct export directory.
-    /// Removes and recreates the collection if the path is stale.
-    pub async fn ensure_collection(&self) -> Result<()> {
         let collection_name = self.config.qmd_collection_name();
         let export_dir = self.config.export_dir();
 
-        std::fs::create_dir_all(&export_dir)
+        std::fs::create_dir_all(export_dir)
             .with_context(|| format!("Failed to create export dir: {}", export_dir.display()))?;
 
-        if self.collection_exists().await? {
-            if self.collection_path_matches().await? {
-                tracing::debug!("QMD collection '{collection_name}' already exists with correct path");
-                return Ok(());
-            }
-            // Collection exists but points at the wrong path — remove it.
-            tracing::info!("QMD collection '{collection_name}' points at wrong path, recreating");
-            run_qmd_command(&["collection", "remove", collection_name]).await?;
-        }
-
-        let status = Command::new("qmd")
+        let output = Command::new("qmd")
             .args([
                 "collection",
                 "add",
@@ -115,17 +90,15 @@ impl QmdClient {
                 "--name",
                 collection_name,
             ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()
+            .output()
             .await
             .context("Failed to run `qmd collection add`")?;
 
-        if !status.success() {
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(QmdError::CommandFailed {
                 command: "collection add".into(),
-                stderr: format!("exited with status {status}"),
+                stderr: stderr.into(),
             }
             .into());
         }
@@ -144,53 +117,20 @@ impl QmdClient {
         run_qmd_command(&["embed"]).await
     }
 
-    /// Hybrid search via `qmd query` — query expansion + reranking.
-    /// Fast (~0.3s) when QMD daemon is running, slow (~20s) cold.
+    /// Run a hybrid search (semantic + keyword) via `qmd query`.
+    ///
+    /// Returns results enriched with frontmatter metadata from each matched file.
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.run_search("query", query, limit).await
-    }
-
-    /// Check if the QMD HTTP daemon is running.
-    pub async fn is_daemon_running(&self) -> bool {
-        Command::new("qmd")
-            .args(["mcp", "status"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
-
-    /// Start the QMD HTTP daemon for fast model-cached searches.
-    pub async fn start_daemon(&self) -> Result<()> {
-        if self.is_daemon_running().await {
-            return Ok(());
-        }
-        let status = Command::new("qmd")
-            .args(["mcp", "--http", "--daemon"])
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .stdin(std::process::Stdio::null())
-            .status()
-            .await
-            .context("Failed to start QMD daemon")?;
-
-        if !status.success() {
-            anyhow::bail!("Failed to start QMD daemon");
-        }
-        Ok(())
-    }
-
-    async fn run_search(&self, subcommand: &str, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let collection_name = self.config.qmd_collection_name();
+
+        if !self.collection_exists().await? {
+            return Err(QmdError::CollectionNotFound(collection_name.into()).into());
+        }
+
         let limit_str = limit.to_string();
-
-        tracing::debug!("Running: qmd {subcommand} {query:?} -c {collection_name} -n {limit_str}");
-
         let output = Command::new("qmd")
             .args([
-                subcommand,
+                "query",
                 query,
                 "-c",
                 collection_name,
@@ -198,48 +138,37 @@ impl QmdClient {
                 &limit_str,
                 "--json",
             ])
-            .stdin(std::process::Stdio::null())
             .output()
             .await
-            .with_context(|| format!("Failed to run `qmd {subcommand}`"))?;
-
-        tracing::debug!("qmd {subcommand} exited with status: {}", output.status);
+            .context("Failed to run `qmd query`")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let stderr_lower = stderr.to_lowercase();
-            if stderr_lower.contains("collection") && stderr_lower.contains("not found") {
-                return Err(QmdError::CollectionNotFound(collection_name.into()).into());
-            }
             return Err(QmdError::CommandFailed {
-                command: subcommand.into(),
+                command: "query".into(),
                 stderr: stderr.into(),
             }
             .into());
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        tracing::debug!("qmd output: {} bytes", stdout.len());
-        let export_dir = self.config.export_dir();
-        parse_search_results(&stdout, &export_dir)
+        parse_search_results(&stdout)
     }
 }
 
-/// Run a QMD command with stdout/stderr inherited so the user sees progress.
+/// Run a simple QMD command that takes no collection or query args.
 async fn run_qmd_command(args: &[&str]) -> Result<()> {
-    let status = Command::new("qmd")
+    let output = Command::new("qmd")
         .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
+        .output()
         .await
         .with_context(|| format!("Failed to run `qmd {}`", args.join(" ")))?;
 
-    if !status.success() {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(QmdError::CommandFailed {
             command: args.join(" "),
-            stderr: format!("exited with status {status}"),
+            stderr: stderr.into(),
         }
         .into());
     }
@@ -248,7 +177,7 @@ async fn run_qmd_command(args: &[&str]) -> Result<()> {
 }
 
 /// Parse QMD JSON output into SearchResults, enriching each with frontmatter.
-fn parse_search_results(json_str: &str, export_dir: &Path) -> Result<Vec<SearchResult>> {
+fn parse_search_results(json_str: &str) -> Result<Vec<SearchResult>> {
     let raw_results: Vec<serde_json::Value> = match serde_json::from_str(json_str) {
         Ok(v) => v,
         Err(e) => {
@@ -261,11 +190,10 @@ fn parse_search_results(json_str: &str, export_dir: &Path) -> Result<Vec<SearchR
 
     for raw in &raw_results {
         let file_path = raw
-            .get("file")
-            .or_else(|| raw.get("displayPath"))
+            .get("displayPath")
             .or_else(|| raw.get("path"))
             .and_then(|v| v.as_str())
-            .map(|uri| resolve_qmd_uri(uri, export_dir));
+            .map(String::from);
 
         let mut result = SearchResult {
             score: raw
@@ -296,19 +224,6 @@ fn parse_search_results(json_str: &str, export_dir: &Path) -> Result<Vec<SearchR
     }
 
     Ok(results)
-}
-
-/// Resolve a QMD URI like `qmd://claude-sessions/foo.md` to a filesystem path.
-/// Falls back to returning the input as-is if it's already a real path.
-fn resolve_qmd_uri(uri: &str, export_dir: &Path) -> String {
-    // QMD URIs look like: qmd://collection-name/relative/path.md
-    if let Some(rest) = uri.strip_prefix("qmd://") {
-        // Strip the collection name (first path segment)
-        if let Some((_collection, relative)) = rest.split_once('/') {
-            return export_dir.join(relative).to_string_lossy().to_string();
-        }
-    }
-    uri.to_string()
 }
 
 /// Parse YAML-style frontmatter from a markdown file.

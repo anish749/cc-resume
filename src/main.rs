@@ -23,24 +23,12 @@ async fn main() -> Result<()> {
         return watcher::run_watcher(&config).await;
     }
 
-    // Log to file if CLAUDE_RESUME_LOG is set, otherwise stderr.
-    // For TUI mode, stderr is swallowed by the alternate screen,
-    // so use: CLAUDE_RESUME_LOG=/tmp/cr.log claude-resume
-    if let Ok(log_path) = std::env::var("CLAUDE_RESUME_LOG") {
-        let file = std::fs::File::create(&log_path)?;
-        tracing_subscriber::fmt()
-            .with_env_filter("claude_resume=debug")
-            .with_writer(file)
-            .with_ansi(false)
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive("claude_resume=info".parse()?),
-            )
-            .init();
-    }
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("claude_resume=info".parse()?),
+        )
+        .init();
 
     let cli = Cli::parse();
 
