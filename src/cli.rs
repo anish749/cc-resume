@@ -31,6 +31,12 @@ pub enum Commands {
     },
     /// Guided setup: check QMD installation, create collection, initial index
     Setup,
+    /// Summarize sessions (generate AI summaries for sessions that need them)
+    Summarize {
+        /// Force re-summarize all sessions (ignore existing summaries)
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -119,6 +125,76 @@ pub async fn handle_daemon(action: DaemonAction) -> Result<()> {
         DaemonAction::Status => crate::watcher::daemon_status(&config)?,
     }
 
+    Ok(())
+}
+
+pub async fn handle_summarize(full: bool) -> Result<()> {
+    let config = crate::config::Config::load()?;
+
+    // Check claude CLI is available
+    let claude_check = tokio::process::Command::new("claude")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    if claude_check.is_err() || !claude_check.unwrap().success() {
+        anyhow::bail!("Claude CLI is not installed or not on PATH. It's required for summarization.");
+    }
+
+    let sessions_dir = config.export_dir();
+    if !sessions_dir.is_dir() {
+        anyhow::bail!(
+            "Sessions directory not found: {}. Run `claude-resume index` first.",
+            sessions_dir.display()
+        );
+    }
+
+    if full {
+        // Delete all existing summaries to force re-generation
+        let summaries_dir = config.summaries_dir();
+        if summaries_dir.is_dir() {
+            println!("Clearing existing summaries...");
+            std::fs::remove_dir_all(&summaries_dir)?;
+        }
+    }
+
+    let queue = crate::summarizer::SummarizeQueue::new();
+    let enqueued = crate::summarizer::enqueue_pending(&config, &queue).await?;
+
+    if enqueued == 0 {
+        println!("All sessions are up to date. Nothing to summarize.");
+        return Ok(());
+    }
+
+    println!("Summarizing {enqueued} sessions...\n");
+
+    let mut done = 0;
+    let mut errors = 0;
+    while let Some(job) = queue.pop().await {
+        print!(
+            "[{}/{}] {} ({})",
+            done + 1,
+            enqueued,
+            &job.session_id[..8.min(job.session_id.len())],
+            if job.is_update { "update" } else { "initial" }
+        );
+
+        match crate::summarizer::summarize_session(&config, &job).await {
+            Ok(summary) => {
+                crate::summarizer::write_summary(&config, &summary)?;
+                println!(" ✓");
+                done += 1;
+            }
+            Err(e) => {
+                println!(" ✗ {e}");
+                errors += 1;
+            }
+        }
+    }
+
+    println!("\nDone: {done} summarized, {errors} errors.");
     Ok(())
 }
 
