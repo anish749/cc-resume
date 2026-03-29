@@ -5,14 +5,12 @@ use ratatui::Terminal;
 use std::time::Duration;
 use tokio::time::Instant;
 
-use crate::config::Config;
 use crate::qmd::{QmdClient, SearchResult};
 
 use super::input::{self, InputAction};
 use super::ui;
 
 pub struct App {
-    pub config: Config,
     pub qmd: QmdClient,
     pub search_input: String,
     pub cursor_position: usize,
@@ -32,9 +30,8 @@ pub enum AppMode {
 }
 
 impl App {
-    pub fn new(config: Config, qmd: QmdClient) -> Self {
+    pub fn new(qmd: QmdClient) -> Self {
         Self {
-            config,
             qmd,
             search_input: String::new(),
             cursor_position: 0,

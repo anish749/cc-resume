@@ -14,11 +14,8 @@ pub struct QmdClient {
 /// A single search result from QMD, enriched with frontmatter metadata.
 #[derive(Debug, Clone, Default)]
 pub struct SearchResult {
-    pub doc_id: Option<String>,
     pub score: f64,
     pub file_path: Option<String>,
-    pub snippet: Option<String>,
-    // Parsed from frontmatter of the matched markdown file:
     pub session_id: Option<String>,
     pub project_path: Option<String>,
     pub project_name: Option<String>,
@@ -136,13 +133,6 @@ impl QmdClient {
         self.run_search_command("query", query, limit).await
     }
 
-    /// Run a keyword-only BM25 search via `qmd search`.
-    ///
-    /// Faster than hybrid search but lower recall for semantic queries.
-    pub async fn keyword_search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.run_search_command("search", query, limit).await
-    }
-
     /// Common implementation for search commands (`query`, `search`, `vsearch`).
     async fn run_search_command(
         &self,
@@ -194,15 +184,10 @@ impl QmdClient {
                 .map(String::from);
 
             let mut result = SearchResult {
-                doc_id: raw.get("docid").and_then(|v| v.as_str()).map(String::from),
                 score: raw
                     .get("score")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0),
-                snippet: raw
-                    .get("snippet")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
                 file_path: file_path.clone(),
                 ..Default::default()
             };

@@ -80,14 +80,4 @@ impl Config {
             .join(EXPORT_DIR_NAME)
             .join("daemon.log")
     }
-
-    /// Root data directory for claude-resume.
-    pub fn data_dir(&self) -> PathBuf {
-        self.claude_config_dir.join(EXPORT_DIR_NAME)
-    }
-
-    /// The root Claude config directory.
-    pub fn claude_config_dir(&self) -> &PathBuf {
-        &self.claude_config_dir
-    }
 }
