@@ -26,6 +26,9 @@ notify-debouncer-full = "0.4"
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
 
+# HTTP client (for QMD MCP daemon)
+reqwest = { version = "0.12", features = ["json"] }
+
 # Error handling
 anyhow = "1"
 thiserror = "2"

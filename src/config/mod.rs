@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 const DEFAULT_CLAUDE_DIR: &str = ".claude";
-const EXPORT_DIR_NAME: &str = "claude-resume";
+const DATA_DIR_NAME: &str = ".ccresume";
 const QMD_COLLECTION: &str = "claude-sessions";
 
 /// Application configuration, resolved from environment and defaults.
@@ -11,19 +11,24 @@ const QMD_COLLECTION: &str = "claude-sessions";
 pub struct Config {
     /// Root Claude config directory (e.g., ~/.claude)
     claude_config_dir: PathBuf,
-    /// Where exported markdown sessions live
-    export_dir: PathBuf,
+    /// Our own data directory, sibling of the Claude config dir (e.g., ~/.ccresume)
+    data_dir: PathBuf,
 }
 
 impl Config {
     /// Load configuration, respecting CLAUDE_CONFIG_DIR env var.
     pub fn load() -> Result<Self> {
         let claude_config_dir = Self::resolve_claude_dir()?;
-        let export_dir = claude_config_dir.join(EXPORT_DIR_NAME).join("sessions");
+
+        // Place .ccresume as a sibling of the Claude config directory.
+        let parent = claude_config_dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Claude config dir has no parent: {}", claude_config_dir.display()))?;
+        let data_dir = parent.join(DATA_DIR_NAME);
 
         Ok(Self {
             claude_config_dir,
-            export_dir,
+            data_dir,
         })
     }
 
@@ -58,8 +63,8 @@ impl Config {
     }
 
     /// Path to the export directory (markdown files for QMD).
-    pub fn export_dir(&self) -> &PathBuf {
-        &self.export_dir
+    pub fn export_dir(&self) -> PathBuf {
+        self.data_dir.join("sessions")
     }
 
     /// QMD collection name.
@@ -69,15 +74,11 @@ impl Config {
 
     /// Path to the daemon PID file.
     pub fn daemon_pid_file(&self) -> PathBuf {
-        self.claude_config_dir
-            .join(EXPORT_DIR_NAME)
-            .join("daemon.pid")
+        self.data_dir.join("daemon.pid")
     }
 
     /// Path to the daemon log file.
     pub fn daemon_log_file(&self) -> PathBuf {
-        self.claude_config_dir
-            .join(EXPORT_DIR_NAME)
-            .join("daemon.log")
+        self.data_dir.join("daemon.log")
     }
 }

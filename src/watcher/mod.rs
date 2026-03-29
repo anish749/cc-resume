@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use crate::config::Config;
 
+pub use daemon::is_running;
 pub use daemon::run_watcher;
 
 pub async fn start_daemon(config: &Config) -> Result<()> {
