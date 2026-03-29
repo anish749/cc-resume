@@ -144,24 +144,50 @@ impl QmdClient {
         run_qmd_command(&["embed"]).await
     }
 
-    /// Fast vector search (~0.25s). Use for interactive typing.
-    pub async fn fast_search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.run_search("vsearch", query, limit).await
+    /// Hybrid search via `qmd query` — query expansion + reranking.
+    /// Fast (~0.3s) when QMD daemon is running, slow (~20s) cold.
+    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.run_search("query", query, limit).await
     }
 
-    /// Full hybrid search with LLM reranking (~20s). Use for final results.
-    pub async fn deep_search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.run_search("query", query, limit).await
+    /// Check if the QMD HTTP daemon is running.
+    pub async fn is_daemon_running(&self) -> bool {
+        Command::new("qmd")
+            .args(["mcp", "status"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Start the QMD HTTP daemon for fast model-cached searches.
+    pub async fn start_daemon(&self) -> Result<()> {
+        if self.is_daemon_running().await {
+            return Ok(());
+        }
+        let status = Command::new("qmd")
+            .args(["mcp", "--http", "--daemon"])
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .stdin(std::process::Stdio::null())
+            .status()
+            .await
+            .context("Failed to start QMD daemon")?;
+
+        if !status.success() {
+            anyhow::bail!("Failed to start QMD daemon");
+        }
+        Ok(())
     }
 
     async fn run_search(&self, subcommand: &str, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let collection_name = self.config.qmd_collection_name();
-
-        if !self.collection_exists().await? {
-            return Err(QmdError::CollectionNotFound(collection_name.into()).into());
-        }
-
         let limit_str = limit.to_string();
+
+        tracing::debug!("Running: qmd {subcommand} {query:?} -c {collection_name} -n {limit_str}");
+
         let output = Command::new("qmd")
             .args([
                 subcommand,
@@ -172,12 +198,19 @@ impl QmdClient {
                 &limit_str,
                 "--json",
             ])
+            .stdin(std::process::Stdio::null())
             .output()
             .await
             .with_context(|| format!("Failed to run `qmd {subcommand}`"))?;
 
+        tracing::debug!("qmd {subcommand} exited with status: {}", output.status);
+
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr_lower = stderr.to_lowercase();
+            if stderr_lower.contains("collection") && stderr_lower.contains("not found") {
+                return Err(QmdError::CollectionNotFound(collection_name.into()).into());
+            }
             return Err(QmdError::CommandFailed {
                 command: subcommand.into(),
                 stderr: stderr.into(),
@@ -186,6 +219,7 @@ impl QmdClient {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
+        tracing::debug!("qmd output: {} bytes", stdout.len());
         let export_dir = self.config.export_dir();
         parse_search_results(&stdout, &export_dir)
     }

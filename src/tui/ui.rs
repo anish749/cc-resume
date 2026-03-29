@@ -380,9 +380,8 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" searching... ", Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC))
         } else if let Some(elapsed) = app.last_search_time {
             let secs = elapsed.as_secs_f64();
-            let mode = if app.is_deep_result { "deep" } else { "fast" };
             Span::styled(
-                format!(" {} results in {secs:.1}s ({mode}) ", app.result_count),
+                format!(" {} results in {secs:.1}s ", app.result_count),
                 Style::default().fg(Color::DarkGray),
             )
         } else {

@@ -39,6 +39,8 @@ pub enum DaemonAction {
     Start,
     /// Stop the file watcher daemon
     Stop,
+    /// Restart the file watcher daemon
+    Restart,
     /// Show daemon status
     Status,
 }
@@ -53,7 +55,7 @@ pub async fn handle_search(query: &str, limit: usize) -> Result<()> {
         );
     }
 
-    let results = qmd.deep_search(query, limit).await?;
+    let results = qmd.search(query, limit).await?;
 
     if results.is_empty() {
         println!("No sessions found for: {query}");
@@ -110,6 +112,10 @@ pub async fn handle_daemon(action: DaemonAction) -> Result<()> {
     match action {
         DaemonAction::Start => crate::watcher::start_daemon(&config).await?,
         DaemonAction::Stop => crate::watcher::stop_daemon(&config)?,
+        DaemonAction::Restart => {
+            crate::watcher::stop_daemon(&config)?;
+            crate::watcher::start_daemon(&config).await?;
+        }
         DaemonAction::Status => crate::watcher::daemon_status(&config)?,
     }
 
@@ -154,11 +160,16 @@ pub async fn handle_setup() -> Result<()> {
     qmd.update().await?;
     qmd.embed().await?;
 
+    // Step 4: Start daemon (file watcher + QMD model cache)
+    println!("\nStarting daemon (file watcher + QMD model cache)...");
+    crate::watcher::start_daemon(&config).await?;
+    println!("[ok] Daemon running — new sessions will be indexed automatically");
+
     println!("\n[ok] Setup complete!");
     println!("\nUsage:");
     println!("  claude-resume              Launch TUI search");
     println!("  claude-resume search \"q\"   CLI search");
-    println!("  claude-resume daemon start  Start file watcher for live indexing");
+    println!("  claude-resume daemon stop   Stop the background daemon");
 
     Ok(())
 }
