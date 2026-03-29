@@ -2,9 +2,19 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use thiserror::Error;
 use tokio::process::Command;
 
 use crate::config::Config;
+
+#[derive(Debug, Error)]
+pub enum QmdError {
+    #[error("QMD collection '{0}' does not exist. Run `claude-resume setup` to create it and index your sessions.")]
+    CollectionNotFound(String),
+
+    #[error("QMD command `qmd {command}` failed:\n{stderr}")]
+    CommandFailed { command: String, stderr: String },
+}
 
 /// A wrapper around the QMD CLI for semantic search over exported markdown sessions.
 pub struct QmdClient {
@@ -25,7 +35,6 @@ pub struct SearchResult {
 }
 
 impl QmdClient {
-    /// Create a new QMD client from the application config.
     pub fn new(config: &Config) -> Self {
         Self {
             config: config.clone(),
@@ -43,35 +52,37 @@ impl QmdClient {
             .unwrap_or(false)
     }
 
-    /// Ensure the QMD collection exists, creating it if necessary.
-    ///
-    /// Runs `qmd collection list` to check, then `qmd collection add` if missing.
-    pub async fn ensure_collection(&self) -> Result<()> {
+    /// Check whether the collection exists by listing collections.
+    async fn collection_exists(&self) -> Result<bool> {
         let collection_name = self.config.qmd_collection_name();
-        let export_dir = self.config.export_dir();
-
-        // Make sure the export directory exists before registering it.
-        std::fs::create_dir_all(export_dir)
-            .with_context(|| format!("Failed to create export dir: {}", export_dir.display()))?;
-
-        // Check if collection already exists.
-        let list_output = Command::new("qmd")
+        let output = Command::new("qmd")
             .args(["collection", "list"])
             .output()
             .await
             .context("Failed to run `qmd collection list`")?;
 
-        if list_output.status.success() {
-            let stdout = String::from_utf8_lossy(&list_output.stdout);
-            // If the collection name appears in the output, it already exists.
-            if stdout.contains(collection_name) {
-                tracing::debug!("QMD collection '{collection_name}' already exists");
-                return Ok(());
-            }
+        if !output.status.success() {
+            return Ok(false);
         }
 
-        // Create the collection.
-        let add_output = Command::new("qmd")
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.contains(collection_name))
+    }
+
+    /// Ensure the QMD collection exists, creating it if necessary.
+    pub async fn ensure_collection(&self) -> Result<()> {
+        if self.collection_exists().await? {
+            tracing::debug!("QMD collection '{}' already exists", self.config.qmd_collection_name());
+            return Ok(());
+        }
+
+        let collection_name = self.config.qmd_collection_name();
+        let export_dir = self.config.export_dir();
+
+        std::fs::create_dir_all(export_dir)
+            .with_context(|| format!("Failed to create export dir: {}", export_dir.display()))?;
+
+        let output = Command::new("qmd")
             .args([
                 "collection",
                 "add",
@@ -83,9 +94,13 @@ impl QmdClient {
             .await
             .context("Failed to run `qmd collection add`")?;
 
-        if !add_output.status.success() {
-            let stderr = String::from_utf8_lossy(&add_output.stderr);
-            anyhow::bail!("qmd collection add failed: {stderr}");
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(QmdError::CommandFailed {
+                command: "collection add".into(),
+                stderr: stderr.into(),
+            }
+            .into());
         }
 
         tracing::info!("Created QMD collection '{collection_name}' at {}", export_dir.display());
@@ -94,58 +109,28 @@ impl QmdClient {
 
     /// Run `qmd update` to re-index documents from the filesystem.
     pub async fn update(&self) -> Result<()> {
-        let output = Command::new("qmd")
-            .arg("update")
-            .output()
-            .await
-            .context("Failed to run `qmd update`")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("qmd update failed: {stderr}");
-        }
-
-        tracing::debug!("QMD update completed");
-        Ok(())
+        run_qmd_command(&["update"]).await
     }
 
     /// Run `qmd embed` to generate/update embeddings.
     pub async fn embed(&self) -> Result<()> {
-        let output = Command::new("qmd")
-            .arg("embed")
-            .output()
-            .await
-            .context("Failed to run `qmd embed`")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("qmd embed failed: {stderr}");
-        }
-
-        tracing::debug!("QMD embed completed");
-        Ok(())
+        run_qmd_command(&["embed"]).await
     }
 
     /// Run a hybrid search (semantic + keyword) via `qmd query`.
     ///
     /// Returns results enriched with frontmatter metadata from each matched file.
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        self.run_search_command("query", query, limit).await
-    }
-
-    /// Common implementation for search commands (`query`, `search`, `vsearch`).
-    async fn run_search_command(
-        &self,
-        subcommand: &str,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<SearchResult>> {
         let collection_name = self.config.qmd_collection_name();
-        let limit_str = limit.to_string();
 
+        if !self.collection_exists().await? {
+            return Err(QmdError::CollectionNotFound(collection_name.into()).into());
+        }
+
+        let limit_str = limit.to_string();
         let output = Command::new("qmd")
             .args([
-                subcommand,
+                "query",
                 query,
                 "-c",
                 collection_name,
@@ -155,78 +140,96 @@ impl QmdClient {
             ])
             .output()
             .await
-            .with_context(|| format!("Failed to run `qmd {subcommand}`"))?;
+            .context("Failed to run `qmd query`")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("collection") && stderr.to_lowercase().contains("not found") {
-                anyhow::bail!(
-                    "QMD collection '{}' not found. Run `claude-resume setup` to create it and index your sessions.",
-                    collection_name
-                );
+            return Err(QmdError::CommandFailed {
+                command: "query".into(),
+                stderr: stderr.into(),
             }
-            anyhow::bail!("qmd {subcommand} failed: {stderr}");
+            .into());
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
+        parse_search_results(&stdout)
+    }
+}
 
-        // Parse the JSON array of results.
-        let raw_results: Vec<serde_json::Value> = match serde_json::from_str(&stdout) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("Failed to parse QMD JSON output: {e}");
-                tracing::debug!("Raw output: {stdout}");
-                return Ok(Vec::new());
-            }
+/// Run a simple QMD command that takes no collection or query args.
+async fn run_qmd_command(args: &[&str]) -> Result<()> {
+    let output = Command::new("qmd")
+        .args(args)
+        .output()
+        .await
+        .with_context(|| format!("Failed to run `qmd {}`", args.join(" ")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(QmdError::CommandFailed {
+            command: args.join(" "),
+            stderr: stderr.into(),
+        }
+        .into());
+    }
+
+    Ok(())
+}
+
+/// Parse QMD JSON output into SearchResults, enriching each with frontmatter.
+fn parse_search_results(json_str: &str) -> Result<Vec<SearchResult>> {
+    let raw_results: Vec<serde_json::Value> = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("Failed to parse QMD JSON output: {e}");
+            return Ok(Vec::new());
+        }
+    };
+
+    let mut results = Vec::with_capacity(raw_results.len());
+
+    for raw in &raw_results {
+        let file_path = raw
+            .get("displayPath")
+            .or_else(|| raw.get("path"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let mut result = SearchResult {
+            score: raw
+                .get("score")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
+            file_path: file_path.clone(),
+            ..Default::default()
         };
 
-        let mut results = Vec::with_capacity(raw_results.len());
-
-        for raw in &raw_results {
-            let file_path = raw
-                .get("displayPath")
-                .or_else(|| raw.get("path"))
-                .and_then(|v| v.as_str())
-                .map(String::from);
-
-            let mut result = SearchResult {
-                score: raw
-                    .get("score")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
-                file_path: file_path.clone(),
-                ..Default::default()
-            };
-
-            // Enrich with frontmatter from the actual file.
-            if let Some(ref path) = file_path {
-                match parse_frontmatter(Path::new(path)) {
-                    Ok(fm) => {
-                        result.session_id = fm.get("session_id").cloned();
-                        result.project_path = fm.get("project_path").cloned();
-                        result.project_name = fm.get("project_name").cloned();
-                        result.date = fm.get("date").cloned();
-                        result.git_branch = fm.get("git_branch").cloned();
-                        result.first_prompt = fm.get("first_prompt").cloned();
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to parse frontmatter from {path}: {e}");
-                    }
+        if let Some(ref path) = file_path {
+            match parse_frontmatter(Path::new(path)) {
+                Ok(fm) => {
+                    result.session_id = fm.get("session_id").cloned();
+                    result.project_path = fm.get("project_path").cloned();
+                    result.project_name = fm.get("project_name").cloned();
+                    result.date = fm.get("date").cloned();
+                    result.git_branch = fm.get("git_branch").cloned();
+                    result.first_prompt = fm.get("first_prompt").cloned();
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse frontmatter from {path}: {e}");
                 }
             }
-
-            results.push(result);
         }
 
-        Ok(results)
+        results.push(result);
     }
+
+    Ok(results)
 }
 
 /// Parse YAML-style frontmatter from a markdown file.
 ///
 /// Expects the file to start with `---`, followed by `key: value` lines,
 /// closed by another `---`. Returns a map of key-value pairs.
-/// Uses simple string splitting rather than a full YAML parser.
 fn parse_frontmatter(path: &Path) -> Result<HashMap<String, String>> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read file: {}", path.display()))?;
@@ -234,31 +237,26 @@ fn parse_frontmatter(path: &Path) -> Result<HashMap<String, String>> {
     let mut map = HashMap::new();
     let mut lines = content.lines();
 
-    // First line must be "---"
     match lines.next() {
         Some(line) if line.trim() == "---" => {}
-        _ => return Ok(map), // No frontmatter
+        _ => return Ok(map),
     }
 
     for line in lines {
         let trimmed = line.trim();
 
-        // End of frontmatter block
         if trimmed == "---" {
             break;
         }
 
-        // Skip empty lines and comments
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
 
-        // Parse "key: value" — split on first ':'
         if let Some((key, value)) = trimmed.split_once(':') {
             let key = key.trim().to_string();
             let mut value = value.trim().to_string();
 
-            // Strip surrounding quotes if present
             if (value.starts_with('"') && value.ends_with('"'))
                 || (value.starts_with('\'') && value.ends_with('\''))
             {
@@ -346,7 +344,7 @@ git_branch:
 
         let fm = parse_frontmatter(&path).unwrap();
         assert_eq!(fm.get("session_id").unwrap(), "abc-123");
-        assert!(fm.get("git_branch").is_none()); // empty value skipped
+        assert!(fm.get("git_branch").is_none());
 
         std::fs::remove_file(&path).ok();
     }
