@@ -144,9 +144,13 @@ impl QmdClient {
         run_qmd_command(&["embed"]).await
     }
 
-    /// Full hybrid search via `qmd query` — LLM query expansion + reranking.
-    /// Best quality results. Runs in background in the TUI so UI stays responsive.
-    pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+    /// Fast vector search (~0.25s). Use for interactive typing.
+    pub async fn fast_search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.run_search("vsearch", query, limit).await
+    }
+
+    /// Full hybrid search with LLM reranking (~20s). Use for final results.
+    pub async fn deep_search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         self.run_search("query", query, limit).await
     }
 

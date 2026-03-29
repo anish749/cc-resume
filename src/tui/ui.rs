@@ -376,16 +376,23 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             ),
         };
 
-        let searching_indicator = if app.searching {
+        let search_status = if app.searching {
             Span::styled(" searching... ", Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC))
+        } else if let Some(elapsed) = app.last_search_time {
+            let secs = elapsed.as_secs_f64();
+            let mode = if app.is_deep_result { "deep" } else { "fast" };
+            Span::styled(
+                format!(" {} results in {secs:.1}s ({mode}) ", app.result_count),
+                Style::default().fg(Color::DarkGray),
+            )
         } else {
             Span::raw("")
         };
 
         Line::from(vec![
             mode_indicator,
-            Span::raw("  "),
-            searching_indicator,
+            search_status,
+            Span::raw(" "),
             Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
             Span::raw(" switch  "),
             Span::styled("[Enter]", Style::default().fg(Color::Yellow)),

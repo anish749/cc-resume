@@ -53,7 +53,7 @@ pub async fn handle_search(query: &str, limit: usize) -> Result<()> {
         );
     }
 
-    let results = qmd.search(query, limit).await?;
+    let results = qmd.deep_search(query, limit).await?;
 
     if results.is_empty() {
         println!("No sessions found for: {query}");
