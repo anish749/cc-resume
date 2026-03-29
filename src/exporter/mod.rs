@@ -21,7 +21,7 @@ pub async fn export_all(config: &Config, full: bool) -> Result<ExportStats> {
     let projects_dir = config.claude_projects_dir();
     let export_dir = config.export_dir();
 
-    std::fs::create_dir_all(export_dir)?;
+    std::fs::create_dir_all(&export_dir)?;
 
     let mut stats = ExportStats::default();
 

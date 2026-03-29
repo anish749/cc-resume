@@ -376,9 +376,16 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             ),
         };
 
+        let searching_indicator = if app.searching {
+            Span::styled(" searching... ", Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC))
+        } else {
+            Span::raw("")
+        };
+
         Line::from(vec![
             mode_indicator,
             Span::raw("  "),
+            searching_indicator,
             Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
             Span::raw(" switch  "),
             Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
