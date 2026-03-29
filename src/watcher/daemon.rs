@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -217,7 +217,7 @@ struct SessionInfo {
 
 /// Extract project name and session ID from a JSONL file path.
 /// Expected: <projects_dir>/<project_name>/<session_id>.jsonl
-fn extract_session_info(path: &PathBuf, projects_dir: &PathBuf) -> Option<SessionInfo> {
+fn extract_session_info(path: &Path, projects_dir: &Path) -> Option<SessionInfo> {
     let relative = path.strip_prefix(projects_dir).ok()?;
     let components: Vec<_> = relative.components().collect();
     if components.len() != 2 {

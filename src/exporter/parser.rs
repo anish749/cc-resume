@@ -307,11 +307,9 @@ fn collect_file_paths(input: &Value, files: &mut Vec<String>) {
 /// Claude Code encodes project paths by replacing `/` with `-`, so
 /// `-Users-anish-git-foo` becomes `/Users/anish/git/foo`.
 fn decode_project_dir(encoded: &str) -> String {
-    if encoded.starts_with('-') {
-        // Replace leading dash and all subsequent dashes with `/`.
-        format!("/{}", encoded[1..].replace('-', "/"))
-    } else {
-        encoded.replace('-', "/")
+    match encoded.strip_prefix('-') {
+        Some(rest) => format!("/{}", rest.replace('-', "/")),
+        None => encoded.replace('-', "/"),
     }
 }
 

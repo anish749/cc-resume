@@ -301,6 +301,12 @@ impl QmdClient {
                 return Err(QmdError::SearchFailed(format!("Session expired: {msg}")).into());
             }
 
+            let msg_lower = msg.to_lowercase();
+            if msg_lower.contains("collection") && msg_lower.contains("not found") {
+                return Err(QmdError::CollectionNotFound(
+                    self.config.qmd_collection_name().to_string(),
+                ).into());
+            }
             return Err(QmdError::SearchFailed(msg.to_string()).into());
         }
 
@@ -399,16 +405,6 @@ fn parse_mcp_results(text: &str, export_dir: &Path) -> Result<Vec<SearchResult>>
     Ok(results)
 }
 
-/// Resolve a QMD URI like `qmd://claude-sessions/foo.md` to a filesystem path.
-fn resolve_qmd_uri(uri: &str, export_dir: &Path) -> String {
-    if let Some(rest) = uri.strip_prefix("qmd://") {
-        if let Some((_collection, relative)) = rest.split_once('/') {
-            return export_dir.join(relative).to_string_lossy().to_string();
-        }
-    }
-    uri.to_string()
-}
-
 /// Parse YAML-style frontmatter from a markdown file.
 fn parse_frontmatter(path: &Path) -> Result<HashMap<String, String>> {
     let content = std::fs::read_to_string(path)
@@ -437,12 +433,10 @@ fn parse_frontmatter(path: &Path) -> Result<HashMap<String, String>> {
             let key = key.trim().to_string();
             let mut value = value.trim().to_string();
 
-            if (value.starts_with('"') && value.ends_with('"'))
-                || (value.starts_with('\'') && value.ends_with('\''))
-            {
-                if value.len() >= 2 {
-                    value = value[1..value.len() - 1].to_string();
-                }
+            let is_quoted = (value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\''));
+            if is_quoted && value.len() >= 2 {
+                value = value[1..value.len() - 1].to_string();
             }
 
             if !key.is_empty() && !value.is_empty() {
@@ -567,16 +561,4 @@ first_prompt: 'Build the TUI'
         assert!(results[0].file_path.as_ref().unwrap().contains("abc-123.md"));
     }
 
-    #[test]
-    fn test_resolve_qmd_uri() {
-        let export_dir = Path::new("/home/user/.ccresume/sessions");
-        assert_eq!(
-            resolve_qmd_uri("qmd://claude-sessions/abc.md", export_dir),
-            "/home/user/.ccresume/sessions/abc.md"
-        );
-        assert_eq!(
-            resolve_qmd_uri("/already/a/path.md", export_dir),
-            "/already/a/path.md"
-        );
-    }
 }
