@@ -37,6 +37,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Unix process management
 libc = "0.2"
 
+# Pin transitive deps that need newer rustc in latest versions
+instability = ">=0.3, <0.3.8"
+darling = ">=0.20, <0.21"
+
 # Misc
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }

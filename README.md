@@ -28,18 +28,15 @@ claude-resume setup        # Guided first-time setup
 - Enter to resume the selected session via `claude --resume`
 - Tab to switch between search and results
 
-## Prerequisites
-
-- [QMD](https://github.com/tobi/qmd) — `npm install -g @tobilu/qmd`
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-- Rust toolchain (to build from source)
-
 ## Install
 
 ```
-cargo install --path .
+npm install -g @tobilu/qmd
+cargo install --git https://github.com/anish749/cc-resume
 claude-resume setup
 ```
+
+Requires Node.js (for QMD) and a Rust toolchain.
 
 ## License
 
