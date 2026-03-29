@@ -159,6 +159,12 @@ impl QmdClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("collection") && stderr.to_lowercase().contains("not found") {
+                anyhow::bail!(
+                    "QMD collection '{}' not found. Run `claude-resume setup` to create it and index your sessions.",
+                    collection_name
+                );
+            }
             anyhow::bail!("qmd {subcommand} failed: {stderr}");
         }
 
