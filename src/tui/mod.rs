@@ -21,28 +21,16 @@ pub async fn run() -> Result<()> {
         crate::watcher::start_daemon(&config).await?;
     }
 
-    // Warm up QMD models by running a real query.
+    // Warm up QMD models by running a real search through the MCP daemon.
     // Cold start loads ~2GB of models into VRAM; this blocks until they're ready.
     eprintln!("Warming up search models (first time may take 20-30s)...");
     let start = Instant::now();
-    let warmup = tokio::process::Command::new("qmd")
-        .args(["query", "test", "-c", "claude-sessions", "-n", "1", "--json"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
-
-    let elapsed = start.elapsed();
-    match warmup {
-        Ok(status) if status.success() => {
-            eprintln!("Models ready ({:.1}s).", elapsed.as_secs_f64());
-        }
+    match qmd.search("test", 1).await {
         Ok(_) => {
-            eprintln!("Warning: warmup query failed. Search may not work correctly.");
+            eprintln!("Models ready ({:.1}s).", start.elapsed().as_secs_f64());
         }
         Err(e) => {
-            eprintln!("Warning: could not run warmup query: {e}");
+            eprintln!("Warning: warmup search failed: {e}");
         }
     }
 
