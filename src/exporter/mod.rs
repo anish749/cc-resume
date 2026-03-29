@@ -7,8 +7,6 @@ use anyhow::Result;
 
 use crate::config::Config;
 
-pub use self::parser::{ParsedSession, SessionMessage};
-
 /// Stats from an export run.
 #[derive(Debug, Default)]
 pub struct ExportStats {

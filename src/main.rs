@@ -2,7 +2,6 @@ mod cli;
 mod config;
 mod exporter;
 mod qmd;
-mod search;
 mod session;
 mod tui;
 mod watcher;

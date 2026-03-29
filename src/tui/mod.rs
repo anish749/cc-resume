@@ -15,7 +15,7 @@ pub async fn run() -> Result<()> {
     }
 
     let mut terminal = ui::setup_terminal()?;
-    let result = app::App::new(config, qmd).run(&mut terminal).await;
+    let result = app::App::new(qmd).run(&mut terminal).await;
     ui::restore_terminal()?;
 
     result
