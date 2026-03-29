@@ -32,6 +32,7 @@ pub struct App {
     pub searching: bool,
     pub last_search_time: Option<Duration>,
     pub result_count: usize,
+    pub preview_scroll: u16,
 
     search_debounce: Option<Instant>,
     search_generation: u64,
@@ -61,6 +62,7 @@ impl App {
             searching: false,
             last_search_time: None,
             result_count: 0,
+            preview_scroll: 0,
             search_debounce: None,
             search_generation: 0,
             search_rx,
@@ -181,6 +183,7 @@ impl App {
     }
 
     pub fn load_preview(&mut self) {
+        self.preview_scroll = 0;
         if let Some(result) = self.results.get(self.selected_index) {
             if let Some(ref file_path) = result.file_path {
                 match std::fs::read_to_string(file_path) {
@@ -193,6 +196,14 @@ impl App {
         } else {
             self.preview_content = None;
         }
+    }
+
+    pub fn scroll_preview_down(&mut self) {
+        self.preview_scroll = self.preview_scroll.saturating_add(3);
+    }
+
+    pub fn scroll_preview_up(&mut self) {
+        self.preview_scroll = self.preview_scroll.saturating_sub(3);
     }
 
     pub fn select_next(&mut self) {

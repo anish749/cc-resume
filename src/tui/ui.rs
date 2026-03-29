@@ -282,7 +282,8 @@ fn draw_preview(f: &mut Frame, app: &App, area: Rect) {
             let lines = render_preview_lines(content, area.width.saturating_sub(2) as usize);
             let paragraph = Paragraph::new(lines)
                 .block(preview_block)
-                .wrap(Wrap { trim: false });
+                .wrap(Wrap { trim: false })
+                .scroll((app.preview_scroll, 0));
             f.render_widget(paragraph, area);
         }
         None => {
@@ -399,7 +400,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("[Esc]", Style::default().fg(Color::Yellow)),
             Span::raw(" quit  "),
             Span::styled("[Up/Down]", Style::default().fg(Color::Yellow)),
-            Span::raw(" navigate"),
+            Span::raw(" navigate  "),
+            Span::styled("[Left/Right]", Style::default().fg(Color::Yellow)),
+            Span::raw(" scroll preview"),
         ])
     };
 

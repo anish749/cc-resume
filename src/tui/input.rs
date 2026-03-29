@@ -137,6 +137,16 @@ fn handle_results_mode(app: &mut App, key: KeyEvent) -> InputAction {
             InputAction::None
         }
 
+        KeyCode::Left | KeyCode::Char('h') => {
+            app.scroll_preview_up();
+            InputAction::None
+        }
+
+        KeyCode::Right | KeyCode::Char('l') => {
+            app.scroll_preview_down();
+            InputAction::None
+        }
+
         KeyCode::Home => {
             if !app.results.is_empty() {
                 app.selected_index = 0;
