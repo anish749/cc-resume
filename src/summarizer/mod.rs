@@ -348,22 +348,24 @@ fn parse_summary_yaml(raw: &str) -> Result<ParsedSummaryResponse> {
         .context("Failed to parse summary YAML from Claude CLI output")
 }
 
-/// Strip ```yaml ... ``` fences if present.
+/// Extract YAML from a response that may contain prose and/or ``` fences.
 fn strip_yaml_fences(s: &str) -> String {
-    let trimmed = s.trim();
-    if trimmed.starts_with("```") {
-        let lines: Vec<&str> = trimmed.lines().collect();
+    // Find the first ``` fence anywhere in the output (Haiku often adds
+    // prose like "Here's the summary:" before the fenced block).
+    if let Some(fence_start) = s.find("```") {
+        let after_fence = &s[fence_start..];
+        let lines: Vec<&str> = after_fence.lines().collect();
         if lines.len() >= 2 {
-            let start = 1; // skip opening fence
-            let end = if lines.last().map_or(false, |l| l.trim().starts_with("```")) {
-                lines.len() - 1
-            } else {
-                lines.len()
-            };
+            let start = 1; // skip opening fence line
+            let end = lines[1..]
+                .iter()
+                .position(|l| l.trim().starts_with("```"))
+                .map(|p| p + 1)
+                .unwrap_or(lines.len());
             return lines[start..end].join("\n");
         }
     }
-    trimmed.to_string()
+    s.trim().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +583,13 @@ mod tests {
         let input = "  \n```yaml\ncontent\n```\n  ";
         let result = strip_yaml_fences(input);
         assert_eq!(result, "content");
+    }
+
+    #[test]
+    fn strip_yaml_fences_prose_before_fence() {
+        let input = "Based on my reading, here's the summary:\n\n```yaml\ntopics:\n  - hello\nsummary: test\n```";
+        let result = strip_yaml_fences(input);
+        assert_eq!(result, "topics:\n  - hello\nsummary: test");
     }
 
     // --- parse_summary_yaml ---
