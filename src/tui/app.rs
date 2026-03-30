@@ -2,12 +2,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, MouseEventKind};
 use ratatui::backend::Backend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use crate::exporter::markdown::SessionDocument;
 use crate::qmd::{QmdClient, SearchResult};
 
 use super::input::{self, InputAction};
@@ -32,6 +33,7 @@ pub struct App {
     pub searching: bool,
     pub last_search_time: Option<Duration>,
     pub result_count: usize,
+    pub preview_scroll: u16,
 
     search_debounce: Option<Instant>,
     search_generation: u64,
@@ -55,6 +57,7 @@ impl App {
             results: Vec::new(),
             selected_index: 0,
             preview_content: None,
+            preview_scroll: 0,
             mode: AppMode::Search,
             should_quit: false,
             status_message: None,
@@ -127,29 +130,37 @@ impl App {
             }
 
             if event::poll(Duration::from_millis(50))? {
-                if let Event::Key(key) = event::read()? {
-                    let action = input::handle_key_event(self, key);
-                    match action {
-                        InputAction::None => {}
-                        InputAction::SearchChanged => {
-                            self.search_debounce = Some(Instant::now());
-                            // Bump generation so in-flight searches get discarded
-                            self.search_generation += 1;
-                        }
-                        InputAction::ResumeSelected => {
-                            if let Some(result) = self.results.get(self.selected_index) {
-                                ui::restore_terminal()?;
-                                crate::session::resume_session(result)?;
-                                return Ok(());
-                            } else {
-                                self.status_message =
-                                    Some("No session selected to resume.".to_string());
+                match event::read()? {
+                    Event::Key(key) => {
+                        let action = input::handle_key_event(self, key);
+                        match action {
+                            InputAction::None => {}
+                            InputAction::SearchChanged => {
+                                self.search_debounce = Some(Instant::now());
+                                // Bump generation so in-flight searches get discarded
+                                self.search_generation += 1;
+                            }
+                            InputAction::ResumeSelected => {
+                                if let Some(result) = self.results.get(self.selected_index) {
+                                    ui::restore_terminal()?;
+                                    crate::session::resume_session(result)?;
+                                    return Ok(());
+                                } else {
+                                    self.status_message =
+                                        Some("No session selected to resume.".to_string());
+                                }
+                            }
+                            InputAction::Quit => {
+                                self.should_quit = true;
                             }
                         }
-                        InputAction::Quit => {
-                            self.should_quit = true;
-                        }
                     }
+                    Event::Mouse(mouse) => match mouse.kind {
+                        MouseEventKind::ScrollDown => self.scroll_preview_down(3),
+                        MouseEventKind::ScrollUp => self.scroll_preview_up(3),
+                        _ => {}
+                    },
+                    _ => {}
                 }
             }
         }
@@ -181,10 +192,19 @@ impl App {
     }
 
     pub fn load_preview(&mut self) {
+        self.preview_scroll = 0;
         if let Some(result) = self.results.get(self.selected_index) {
             if let Some(ref file_path) = result.file_path {
                 match std::fs::read_to_string(file_path) {
-                    Ok(content) => self.preview_content = Some(content),
+                    Ok(content) => {
+                        // Re-render through the typed document so frontmatter
+                        // field order always matches the struct definition,
+                        // regardless of what's on disk.
+                        let normalized = SessionDocument::parse(&content)
+                            .map(|doc| doc.render())
+                            .unwrap_or(content);
+                        self.preview_content = Some(normalized);
+                    }
                     Err(e) => self.preview_content = Some(format!("Error reading preview: {e}")),
                 }
             } else {
@@ -193,6 +213,14 @@ impl App {
         } else {
             self.preview_content = None;
         }
+    }
+
+    pub fn scroll_preview_down(&mut self, amount: u16) {
+        self.preview_scroll = self.preview_scroll.saturating_add(amount);
+    }
+
+    pub fn scroll_preview_up(&mut self, amount: u16) {
+        self.preview_scroll = self.preview_scroll.saturating_sub(amount);
     }
 
     pub fn select_next(&mut self) {

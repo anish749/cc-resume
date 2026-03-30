@@ -23,19 +23,19 @@ pub(crate) struct Frontmatter {
     pub git_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_prompt: Option<String>,
-    #[serde(default)]
-    pub files_touched: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<String>,
-    // AI-generated summary fields
+    // AI-generated summary fields (before files_touched for preview readability)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_topics: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_intent: Option<String>,
+    #[serde(default)]
+    pub files_touched: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
     /// Preserve any unknown fields during round-trips (forward compatibility).
     #[serde(flatten, default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub extra: std::collections::BTreeMap<String, serde_yml::Value>,
@@ -88,12 +88,12 @@ pub fn render(metadata: &SessionMetadata, messages: &[SessionMessage]) -> String
         date: metadata.date.clone(),
         git_branch: metadata.git_branch.clone(),
         first_prompt: metadata.first_prompt.clone(),
-        files_touched: metadata.files_touched.clone(),
-        started_at: metadata.started_at.clone(),
-        ended_at: metadata.ended_at.clone(),
         ai_summary: None,
         ai_topics: None,
         ai_intent: None,
+        files_touched: metadata.files_touched.clone(),
+        started_at: metadata.started_at.clone(),
+        ended_at: metadata.ended_at.clone(),
         extra: std::collections::BTreeMap::new(),
     };
 
@@ -470,6 +470,57 @@ mod tests {
             reparsed.frontmatter.extra.get("custom_field").and_then(|v| v.as_str()),
             Some("some_value")
         );
+    }
+
+    #[test]
+    fn rerender_normalizes_frontmatter_field_order() {
+        // Simulate a file written with the OLD field order:
+        // files_touched before ai_summary.
+        let old_order_content = "\
+---
+session_id: abc-123
+project_name: test-proj
+project_path: /test
+date: '2025-04-15'
+git_branch: main
+first_prompt: Fix the bug
+files_touched:
+- src/main.rs
+- src/lib.rs
+started_at: '2025-04-15T10:00:00Z'
+ended_at: '2025-04-15T10:30:00Z'
+ai_summary: Fixed the login bug
+ai_topics:
+- auth fix
+- token handling
+ai_intent: bug-fix
+---
+# Body
+";
+
+        // Parse and re-render — field order should now match the struct
+        let doc = SessionDocument::parse(old_order_content).unwrap();
+        let rendered = doc.render();
+
+        // ai_summary must appear BEFORE files_touched in the output
+        let ai_summary_pos = rendered.find("ai_summary:").expect("ai_summary missing");
+        let files_touched_pos = rendered.find("files_touched:").expect("files_touched missing");
+        assert!(
+            ai_summary_pos < files_touched_pos,
+            "ai_summary (at {ai_summary_pos}) should appear before files_touched (at {files_touched_pos}) in rendered output:\n{rendered}"
+        );
+
+        // Also verify ai_topics and ai_intent are before files_touched
+        let ai_topics_pos = rendered.find("ai_topics:").expect("ai_topics missing");
+        let ai_intent_pos = rendered.find("ai_intent:").expect("ai_intent missing");
+        assert!(ai_topics_pos < files_touched_pos);
+        assert!(ai_intent_pos < files_touched_pos);
+
+        // And all data is preserved
+        let reparsed = SessionDocument::parse(&rendered).unwrap();
+        assert_eq!(reparsed.frontmatter.ai_summary.as_deref(), Some("Fixed the login bug"));
+        assert_eq!(reparsed.frontmatter.files_touched, vec!["src/main.rs", "src/lib.rs"]);
+        assert_eq!(reparsed.frontmatter.ai_intent.as_deref(), Some("bug-fix"));
     }
 
     #[test]

@@ -113,6 +113,21 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> InputAction {
 }
 
 fn handle_results_mode(app: &mut App, key: KeyEvent) -> InputAction {
+    // Ctrl+d / Ctrl+u: scroll preview down/up
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('d') => {
+                app.scroll_preview_down(10);
+                return InputAction::None;
+            }
+            KeyCode::Char('u') => {
+                app.scroll_preview_up(10);
+                return InputAction::None;
+            }
+            _ => {}
+        }
+    }
+
     match key.code {
         KeyCode::Esc => {
             // Go back to search mode
@@ -134,6 +149,16 @@ fn handle_results_mode(app: &mut App, key: KeyEvent) -> InputAction {
 
         KeyCode::Down | KeyCode::Char('j') => {
             app.select_next();
+            InputAction::None
+        }
+
+        KeyCode::PageDown => {
+            app.scroll_preview_down(20);
+            InputAction::None
+        }
+
+        KeyCode::PageUp => {
+            app.scroll_preview_up(20);
             InputAction::None
         }
 
