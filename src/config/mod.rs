@@ -81,4 +81,9 @@ impl Config {
     pub fn daemon_log_file(&self) -> PathBuf {
         self.data_dir.join("daemon.log")
     }
+
+    /// Path to the summaries directory (YAML summary files).
+    pub fn summaries_dir(&self) -> PathBuf {
+        self.data_dir.join("summaries")
+    }
 }

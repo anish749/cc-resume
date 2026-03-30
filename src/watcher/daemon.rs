@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -7,6 +8,7 @@ use notify_debouncer_full::{new_debouncer, DebouncedEvent};
 use tokio::sync::mpsc;
 
 use crate::config::Config;
+use crate::summarizer::{self, SummarizeQueue};
 
 /// Start the daemon in the background by re-exec'ing ourselves with `_watch`.
 /// This is a no-op if the daemon is already running.
@@ -110,6 +112,8 @@ pub fn is_running(config: &Config) -> bool {
 /// 2. Watches for JSONL file changes in the Claude projects directory
 /// 3. Re-exports changed sessions to markdown
 /// 4. Triggers QMD reindex after a batch of changes settles
+/// 5. Every 15 minutes, scans for sessions needing summarization
+/// 6. Processes one summarization job at a time in a background task
 pub async fn run_watcher(config: &Config) -> Result<()> {
     tracing::info!("Daemon starting");
 
@@ -160,11 +164,37 @@ pub async fn run_watcher(config: &Config) -> Result<()> {
 
     tracing::info!("Watching {} for changes", projects_dir.display());
 
-    // Step 3: Event loop — process file changes, batch QMD reindexes
+    // Step 3: Set up summarization queue
+    let summarize_queue = Arc::new(SummarizeQueue::new());
+    let mut summarizer_busy = false;
+    let mut summarizer_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut last_summary_scan = tokio::time::Instant::now();
+    let summary_scan_interval = Duration::from_secs(15 * 60); // 15 minutes
+
+    // Initial enqueue: populate queue with all unsummarized sessions (newest first)
+    tracing::info!("Scanning sessions for initial summarization backlog...");
+    match summarizer::enqueue_pending(config, &summarize_queue).await {
+        Ok(n) => {
+            if n > 0 {
+                tracing::info!("Enqueued {n} sessions for summarization");
+            }
+        }
+        Err(e) => tracing::warn!("Failed initial summary scan: {e}"),
+    }
+
+    // Step 4: Event loop — process file changes, batch QMD reindexes, summarization
     let mut pending_reindex = false;
     let mut last_export = tokio::time::Instant::now();
 
     loop {
+        // Check if background summarizer task completed
+        if let Some(ref handle) = summarizer_handle {
+            if handle.is_finished() {
+                summarizer_handle = None;
+                summarizer_busy = false;
+            }
+        }
+
         tokio::select! {
             Some(events) = fs_rx.recv() => {
                 for event in events {
@@ -194,8 +224,9 @@ pub async fn run_watcher(config: &Config) -> Result<()> {
                 }
             }
 
-            // Batch reindex: wait 10s after last export before triggering QMD
+            // Tick every second for housekeeping
             _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                // Batch reindex: wait 10s after last export before triggering QMD
                 if pending_reindex
                     && tokio::time::Instant::now().duration_since(last_export) >= Duration::from_secs(10)
                 {
@@ -203,6 +234,61 @@ pub async fn run_watcher(config: &Config) -> Result<()> {
                     tracing::info!("Triggering QMD reindex");
                     if let Err(e) = reindex_qmd().await {
                         tracing::warn!("QMD reindex failed: {e}");
+                    }
+                }
+
+                // Every 15 minutes: scan for sessions needing summarization
+                if tokio::time::Instant::now().duration_since(last_summary_scan) >= summary_scan_interval {
+                    last_summary_scan = tokio::time::Instant::now();
+                    tracing::info!("Periodic summary scan...");
+                    match summarizer::enqueue_pending(config, &summarize_queue).await {
+                        Ok(n) => {
+                            if n > 0 {
+                                tracing::info!("Enqueued {n} sessions for summarization");
+                            }
+                        }
+                        Err(e) => tracing::warn!("Summary scan failed: {e}"),
+                    }
+                }
+
+                // Pop one job from the queue if summarizer is idle
+                if !summarizer_busy {
+                    if let Some(job) = summarize_queue.pop().await {
+                        summarizer_busy = true;
+                        let config_clone = config.clone();
+                        let queue_clone = Arc::clone(&summarize_queue);
+                        summarizer_handle = Some(tokio::spawn(async move {
+                            tracing::info!(
+                                "Summarizing session {} (update={})",
+                                job.session_id,
+                                job.is_update
+                            );
+                            match summarizer::summarize_session(&config_clone, &job).await {
+                                Ok(summary) => {
+                                    if let Err(e) = summarizer::write_summary(&config_clone, &summary) {
+                                        tracing::warn!(
+                                            "Failed to write summary for {}: {e}",
+                                            job.session_id
+                                        );
+                                    } else {
+                                        let remaining = queue_clone.len().await;
+                                        tracing::info!(
+                                            "Summarized {} ({} remaining in queue)",
+                                            job.session_id,
+                                            remaining
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to summarize {}: {e}",
+                                        job.session_id
+                                    );
+                                    // Job is dropped; the next periodic scan will
+                                    // re-discover it if it still needs summarization.
+                                }
+                            }
+                        }));
                     }
                 }
             }

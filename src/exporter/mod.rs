@@ -1,4 +1,4 @@
-mod markdown;
+pub(crate) mod markdown;
 mod parser;
 
 use std::path::Path;

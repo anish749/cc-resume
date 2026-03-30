@@ -1,139 +1,153 @@
+use serde::{Deserialize, Serialize};
+
 use super::parser::{MessageRole, SessionMessage, SessionMetadata};
 
 /// Maximum number of characters for an assistant message block in the output.
 const MAX_ASSISTANT_CHARS: usize = 2000;
 
-/// Render a session as a Markdown document with YAML frontmatter.
-pub fn render(metadata: &SessionMetadata, messages: &[SessionMessage]) -> String {
-    let mut out = String::with_capacity(8 * 1024);
+// ---------------------------------------------------------------------------
+// Session document model
+// ---------------------------------------------------------------------------
 
-    // --- YAML frontmatter ---
-    out.push_str("---\n");
-    write_yaml_field(&mut out, "session_id", &metadata.session_id);
-    write_yaml_field(&mut out, "project_name", &metadata.project_name);
-    write_yaml_field(&mut out, "project_path", &metadata.project_path);
-    write_yaml_opt(&mut out, "date", metadata.date.as_deref());
-    write_yaml_opt(&mut out, "git_branch", metadata.git_branch.as_deref());
-    write_yaml_opt(&mut out, "first_prompt", metadata.first_prompt.as_deref());
+/// The typed frontmatter of a session markdown document.
+/// Uses serde_yml for parsing and rendering — adding a new field is just
+/// adding a struct field with the right serde attributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Frontmatter {
+    pub session_id: String,
+    pub project_name: String,
+    pub project_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_prompt: Option<String>,
+    #[serde(default)]
+    pub files_touched: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+    // AI-generated summary fields
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_topics: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_intent: Option<String>,
+    /// Preserve any unknown fields during round-trips (forward compatibility).
+    #[serde(flatten, default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub extra: std::collections::BTreeMap<String, serde_yml::Value>,
+}
 
-    if metadata.files_touched.is_empty() {
-        out.push_str("files_touched: []\n");
-    } else {
-        out.push_str("files_touched:\n");
-        for f in &metadata.files_touched {
-            out.push_str("  - ");
-            out.push_str(&yaml_escape_value(f));
-            out.push('\n');
+/// A complete session markdown document: typed frontmatter + raw body.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionDocument {
+    pub frontmatter: Frontmatter,
+    /// Everything after the closing `---` of the frontmatter (including the heading and messages).
+    pub body: String,
+}
+
+impl SessionDocument {
+    /// Parse a session markdown string into a typed document.
+    pub fn parse(content: &str) -> Option<Self> {
+        if !content.starts_with("---\n") {
+            return None;
         }
+
+        let rest = &content[4..]; // skip opening "---\n"
+        let closing_pos = rest.find("\n---\n")?;
+        let frontmatter_str = &rest[..closing_pos];
+        let body = rest[closing_pos + 5..].to_string(); // skip "\n---\n"
+
+        let frontmatter: Frontmatter = serde_yml::from_str(frontmatter_str).ok()?;
+        Some(Self { frontmatter, body })
     }
 
-    write_yaml_opt(&mut out, "started_at", metadata.started_at.as_deref());
-    write_yaml_opt(&mut out, "ended_at", metadata.ended_at.as_deref());
-    out.push_str("---\n\n");
+    /// Render the document back to a markdown string.
+    pub fn render(&self) -> String {
+        let yaml = serde_yml::to_string(&self.frontmatter)
+            .expect("Frontmatter serialization should not fail");
 
-    // --- Heading ---
+        let mut out = String::with_capacity(yaml.len() + self.body.len() + 16);
+        out.push_str("---\n");
+        out.push_str(&yaml);
+        out.push_str("---\n");
+        out.push_str(&self.body);
+        out
+    }
+}
+
+/// Build a `SessionDocument` from parsed session data (initial export).
+pub fn render(metadata: &SessionMetadata, messages: &[SessionMessage]) -> String {
+    let frontmatter = Frontmatter {
+        session_id: metadata.session_id.clone(),
+        project_name: metadata.project_name.clone(),
+        project_path: metadata.project_path.clone(),
+        date: metadata.date.clone(),
+        git_branch: metadata.git_branch.clone(),
+        first_prompt: metadata.first_prompt.clone(),
+        files_touched: metadata.files_touched.clone(),
+        started_at: metadata.started_at.clone(),
+        ended_at: metadata.ended_at.clone(),
+        ai_summary: None,
+        ai_topics: None,
+        ai_intent: None,
+        extra: std::collections::BTreeMap::new(),
+    };
+
+    let mut body = String::with_capacity(8 * 1024);
+
+    // Heading
     let short_id: String = metadata.session_id.chars().take(8).collect();
     let date_str = metadata.date.as_deref().unwrap_or("unknown");
-    out.push_str(&format!("# Session: {date_str} ({short_id})\n\n"));
+    body.push_str(&format!("\n# Session: {date_str} ({short_id})\n\n"));
 
-    // --- Messages ---
+    // Messages
     for msg in messages {
         match msg.role {
             MessageRole::User => {
-                out.push_str("## User\n\n");
-                out.push_str(&msg.content);
-                out.push_str("\n\n");
+                body.push_str("## User\n\n");
+                body.push_str(&msg.content);
+                body.push_str("\n\n");
             }
             MessageRole::Assistant => {
-                out.push_str("## Assistant\n\n");
+                body.push_str("## Assistant\n\n");
                 let text = truncate_content(&msg.content, MAX_ASSISTANT_CHARS);
-                out.push_str(&text);
-                out.push_str("\n\n");
+                body.push_str(&text);
+                body.push_str("\n\n");
             }
         }
     }
 
-    out
+    let doc = SessionDocument { frontmatter, body };
+    doc.render()
+}
+
+/// Inject AI summary fields into an existing session markdown file.
+/// Parses the document, sets the summary fields, and writes it back.
+pub(crate) fn inject_summary(
+    md_path: &std::path::Path,
+    summary: &str,
+    topics: &[String],
+    intent: &str,
+) -> anyhow::Result<()> {
+    let content = std::fs::read_to_string(md_path)?;
+    let mut doc = SessionDocument::parse(&content)
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse session document"))?;
+
+    doc.frontmatter.ai_summary = Some(summary.to_string());
+    doc.frontmatter.ai_topics = Some(topics.to_vec());
+    doc.frontmatter.ai_intent = Some(intent.to_string());
+
+    std::fs::write(md_path, doc.render())?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// YAML helpers
+// Helpers
 // ---------------------------------------------------------------------------
-
-/// Write a required YAML scalar field.
-fn write_yaml_field(out: &mut String, key: &str, value: &str) {
-    out.push_str(key);
-    out.push_str(": ");
-    out.push_str(&yaml_escape_value(value));
-    out.push('\n');
-}
-
-/// Write an optional YAML scalar field. Omits the field when `None`.
-fn write_yaml_opt(out: &mut String, key: &str, value: Option<&str>) {
-    match value {
-        Some(v) => write_yaml_field(out, key, v),
-        None => {
-            out.push_str(key);
-            out.push_str(": null\n");
-        }
-    }
-}
-
-/// Escape a YAML scalar value if it contains characters that could confuse a
-/// YAML parser. We always quote when in doubt.
-fn yaml_escape_value(value: &str) -> String {
-    // Characters that signal "quote this value".
-    let needs_quoting = value.is_empty()
-        || value.contains(':')
-        || value.contains('#')
-        || value.contains('\'')
-        || value.contains('"')
-        || value.contains('\n')
-        || value.contains('\r')
-        || value.contains('\\')
-        || value.contains('{')
-        || value.contains('}')
-        || value.contains('[')
-        || value.contains(']')
-        || value.contains(',')
-        || value.contains('&')
-        || value.contains('*')
-        || value.contains('?')
-        || value.contains('|')
-        || value.contains('>')
-        || value.contains('!')
-        || value.contains('%')
-        || value.contains('@')
-        || value.contains('`')
-        || value.starts_with('-')
-        || value.starts_with(' ')
-        || value.ends_with(' ')
-        || looks_like_yaml_special(value);
-
-    if !needs_quoting {
-        return value.to_string();
-    }
-
-    // Use double-quoted form with escaped internals.
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
-
-    format!("\"{escaped}\"")
-}
-
-/// Returns true for values that YAML might interpret as booleans, nulls, or
-/// numbers (e.g. "true", "null", "1.5").
-fn looks_like_yaml_special(value: &str) -> bool {
-    let lower = value.to_lowercase();
-    matches!(
-        lower.as_str(),
-        "true" | "false" | "yes" | "no" | "on" | "off" | "null" | "~"
-    ) || value.parse::<f64>().is_ok()
-}
 
 /// Truncate content to `max` characters, appending an ellipsis indicator if
 /// truncated.
@@ -145,6 +159,10 @@ fn truncate_content(s: &str, max: usize) -> String {
         format!("{truncated}\n\n[...truncated]")
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -183,41 +201,275 @@ mod tests {
         ]
     }
 
+    fn sample_md() -> String {
+        render(&sample_metadata(), &sample_messages())
+    }
+
+    // --- Render tests ---
+
     #[test]
     fn render_produces_frontmatter_and_body() {
-        let md = render(&sample_metadata(), &sample_messages());
+        let md = sample_md();
 
         assert!(md.starts_with("---\n"));
         assert!(md.contains("session_id: abcdef12-3456-7890-abcd-ef1234567890\n"));
-        assert!(md.contains("date: 2025-04-15\n"));
-        assert!(md.contains("git_branch: main\n"));
-        assert!(md.contains("files_touched:\n  - src/auth.rs\n  - src/main.rs\n"));
         assert!(md.contains("# Session: 2025-04-15 (abcdef12)"));
         assert!(md.contains("## User\n\nFix the login bug"));
         assert!(md.contains("## Assistant\n\nI found the issue in auth.rs."));
     }
 
     #[test]
-    fn yaml_escape_plain() {
-        assert_eq!(yaml_escape_value("hello"), "hello");
+    fn render_without_ai_fields_does_not_include_them() {
+        let md = sample_md();
+        assert!(!md.contains("ai_summary"));
+        assert!(!md.contains("ai_topics"));
+        assert!(!md.contains("ai_intent"));
+    }
+
+    // --- Parse/roundtrip tests ---
+
+    #[test]
+    fn parse_roundtrip_preserves_content() {
+        let md = sample_md();
+        let doc = SessionDocument::parse(&md).expect("should parse");
+
+        assert_eq!(doc.frontmatter.session_id, "abcdef12-3456-7890-abcd-ef1234567890");
+        assert_eq!(doc.frontmatter.project_path, "/Users/anish/git/myproj");
+        assert_eq!(doc.frontmatter.date, Some("2025-04-15".to_string()));
+        assert_eq!(doc.frontmatter.git_branch, Some("main".to_string()));
+        assert_eq!(doc.frontmatter.files_touched, vec!["src/auth.rs", "src/main.rs"]);
+        assert!(doc.frontmatter.ai_summary.is_none());
+        assert!(doc.frontmatter.ai_topics.is_none());
+        assert!(doc.frontmatter.ai_intent.is_none());
+
+        // Re-render and re-parse should be stable
+        let rendered = doc.render();
+        let doc2 = SessionDocument::parse(&rendered).expect("should re-parse");
+        assert_eq!(doc.frontmatter, doc2.frontmatter);
+    }
+
+    // --- Summary injection tests ---
+
+    #[test]
+    fn inject_summary_adds_ai_fields() {
+        let md = sample_md();
+        let mut doc = SessionDocument::parse(&md).unwrap();
+
+        doc.frontmatter.ai_summary = Some("Fixed a login bug in auth.rs".to_string());
+        doc.frontmatter.ai_topics = Some(vec![
+            "Debugged authentication failure in the login flow".to_string(),
+            "Fixed token validation logic in auth middleware".to_string(),
+        ]);
+        doc.frontmatter.ai_intent = Some("bug-fix".to_string());
+
+        let rendered = doc.render();
+
+        assert!(rendered.contains("ai_summary:"));
+        assert!(rendered.contains("ai_topics:"));
+        assert!(rendered.contains("ai_intent:"));
+        // Body preserved
+        assert!(rendered.contains("## User\n\nFix the login bug"));
     }
 
     #[test]
-    fn yaml_escape_colon() {
-        let escaped = yaml_escape_value("key: value");
-        assert_eq!(escaped, r#""key: value""#);
+    fn inject_summary_roundtrip() {
+        let md = sample_md();
+        let mut doc = SessionDocument::parse(&md).unwrap();
+
+        let summary = "Fixed a login bug in auth.rs by correcting token validation.";
+        let topics = vec![
+            "Debugged authentication failure caused by expired token check".to_string(),
+            "Updated the auth middleware to handle edge cases with refresh tokens".to_string(),
+        ];
+        let intent = "bug-fix";
+
+        doc.frontmatter.ai_summary = Some(summary.to_string());
+        doc.frontmatter.ai_topics = Some(topics.clone());
+        doc.frontmatter.ai_intent = Some(intent.to_string());
+
+        let rendered = doc.render();
+        let reparsed = SessionDocument::parse(&rendered).unwrap();
+
+        assert_eq!(reparsed.frontmatter.ai_summary.as_deref(), Some(summary));
+        assert_eq!(reparsed.frontmatter.ai_topics.as_ref(), Some(&topics));
+        assert_eq!(reparsed.frontmatter.ai_intent.as_deref(), Some(intent));
+        // Original fields preserved
+        assert_eq!(reparsed.frontmatter.session_id, doc.frontmatter.session_id);
+        assert_eq!(reparsed.frontmatter.files_touched, doc.frontmatter.files_touched);
     }
 
     #[test]
-    fn yaml_escape_newline() {
-        let escaped = yaml_escape_value("line1\nline2");
-        assert_eq!(escaped, r#""line1\nline2""#);
+    fn inject_summary_overwrites_existing_ai_fields() {
+        let md = sample_md();
+        let mut doc = SessionDocument::parse(&md).unwrap();
+
+        // First injection
+        doc.frontmatter.ai_summary = Some("Old summary".to_string());
+        doc.frontmatter.ai_topics = Some(vec!["Old topic".to_string()]);
+        doc.frontmatter.ai_intent = Some("exploration".to_string());
+
+        let rendered1 = doc.render();
+
+        // Second injection (simulates re-summarization)
+        let mut doc2 = SessionDocument::parse(&rendered1).unwrap();
+        doc2.frontmatter.ai_summary = Some("New summary".to_string());
+        doc2.frontmatter.ai_topics = Some(vec![
+            "New topic one".to_string(),
+            "New topic two".to_string(),
+        ]);
+        doc2.frontmatter.ai_intent = Some("bug-fix".to_string());
+
+        let rendered2 = doc2.render();
+        let final_doc = SessionDocument::parse(&rendered2).unwrap();
+
+        assert_eq!(final_doc.frontmatter.ai_summary.as_deref(), Some("New summary"));
+        assert_eq!(
+            final_doc.frontmatter.ai_topics.as_ref().unwrap(),
+            &vec!["New topic one".to_string(), "New topic two".to_string()]
+        );
+        assert_eq!(final_doc.frontmatter.ai_intent.as_deref(), Some("bug-fix"));
+        // No trace of old values
+        assert!(!rendered2.contains("Old summary"));
+        assert!(!rendered2.contains("Old topic"));
     }
 
     #[test]
-    fn yaml_escape_bool() {
-        assert_eq!(yaml_escape_value("true"), r#""true""#);
-        assert_eq!(yaml_escape_value("false"), r#""false""#);
+    fn parse_returns_none_for_no_frontmatter() {
+        assert!(SessionDocument::parse("# Just a heading\n\nSome content").is_none());
+    }
+
+    #[test]
+    fn empty_files_touched_roundtrips() {
+        let md = render(
+            &SessionMetadata {
+                files_touched: vec![],
+                ..sample_metadata()
+            },
+            &sample_messages(),
+        );
+        let doc = SessionDocument::parse(&md).unwrap();
+        assert!(doc.frontmatter.files_touched.is_empty());
+    }
+
+    #[test]
+    fn empty_topics_roundtrips() {
+        let md = sample_md();
+        let mut doc = SessionDocument::parse(&md).unwrap();
+        doc.frontmatter.ai_topics = Some(vec![]);
+        doc.frontmatter.ai_summary = Some("test".to_string());
+        doc.frontmatter.ai_intent = Some("feature".to_string());
+
+        let rendered = doc.render();
+        let reparsed = SessionDocument::parse(&rendered).unwrap();
+        assert_eq!(reparsed.frontmatter.ai_topics, Some(vec![]));
+    }
+
+    // --- Serde roundtrip edge cases ---
+
+    #[test]
+    fn special_characters_in_first_prompt_roundtrip() {
+        let md = render(
+            &SessionMetadata {
+                first_prompt: Some("Fix the bug: it's \"broken\" & won't work\nnewline here".to_string()),
+                ..sample_metadata()
+            },
+            &sample_messages(),
+        );
+        let doc = SessionDocument::parse(&md).unwrap();
+        assert_eq!(
+            doc.frontmatter.first_prompt.as_deref(),
+            Some("Fix the bug: it's \"broken\" & won't work\nnewline here")
+        );
+
+        // Double roundtrip
+        let rendered = doc.render();
+        let doc2 = SessionDocument::parse(&rendered).unwrap();
+        assert_eq!(doc.frontmatter.first_prompt, doc2.frontmatter.first_prompt);
+    }
+
+    #[test]
+    fn special_characters_in_topics_roundtrip() {
+        let md = sample_md();
+        let mut doc = SessionDocument::parse(&md).unwrap();
+
+        let topics = vec![
+            "Debugged the auth: tokens weren't refreshing properly".to_string(),
+            "Fixed \"edge case\" where user's session expired & caused a crash".to_string(),
+            "Refactored code with special chars like {braces}, [brackets], *asterisks*".to_string(),
+        ];
+        doc.frontmatter.ai_topics = Some(topics.clone());
+        doc.frontmatter.ai_summary = Some("Summary with: colons & \"quotes\"".to_string());
+        doc.frontmatter.ai_intent = Some("bug-fix".to_string());
+
+        let rendered = doc.render();
+        let reparsed = SessionDocument::parse(&rendered).unwrap();
+
+        assert_eq!(reparsed.frontmatter.ai_topics.as_ref(), Some(&topics));
+        assert_eq!(
+            reparsed.frontmatter.ai_summary.as_deref(),
+            Some("Summary with: colons & \"quotes\"")
+        );
+    }
+
+    #[test]
+    fn project_path_with_dashes_roundtrip() {
+        let md = render(
+            &SessionMetadata {
+                project_name: "-Users-anish-my-cool-project".to_string(),
+                project_path: "/Users/anish/my-cool-project".to_string(),
+                ..sample_metadata()
+            },
+            &sample_messages(),
+        );
+        let doc = SessionDocument::parse(&md).unwrap();
+        assert_eq!(doc.frontmatter.project_path, "/Users/anish/my-cool-project");
+        assert_eq!(doc.frontmatter.project_name, "-Users-anish-my-cool-project");
+    }
+
+    #[test]
+    fn all_optional_fields_none_roundtrip() {
+        let md = render(
+            &SessionMetadata {
+                session_id: "test-id".to_string(),
+                project_name: "test".to_string(),
+                project_path: "/test".to_string(),
+                date: None,
+                git_branch: None,
+                first_prompt: None,
+                files_touched: vec![],
+                started_at: None,
+                ended_at: None,
+            },
+            &sample_messages(),
+        );
+        let doc = SessionDocument::parse(&md).unwrap();
+        assert!(doc.frontmatter.date.is_none());
+        assert!(doc.frontmatter.git_branch.is_none());
+        assert!(doc.frontmatter.first_prompt.is_none());
+        assert!(doc.frontmatter.started_at.is_none());
+        assert!(doc.frontmatter.ended_at.is_none());
+        assert!(doc.frontmatter.ai_summary.is_none());
+    }
+
+    #[test]
+    fn unknown_fields_preserved_on_roundtrip() {
+        let content = "---\nsession_id: abc\nproject_name: test\nproject_path: /test\ncustom_field: some_value\n---\nbody";
+        let doc = SessionDocument::parse(content).unwrap();
+        assert_eq!(doc.frontmatter.session_id, "abc");
+        assert_eq!(doc.body, "body");
+        assert_eq!(
+            doc.frontmatter.extra.get("custom_field").and_then(|v| v.as_str()),
+            Some("some_value")
+        );
+
+        // Round-trip preserves the unknown field
+        let rendered = doc.render();
+        assert!(rendered.contains("custom_field: some_value"));
+        let reparsed = SessionDocument::parse(&rendered).unwrap();
+        assert_eq!(
+            reparsed.frontmatter.extra.get("custom_field").and_then(|v| v.as_str()),
+            Some("some_value")
+        );
     }
 
     #[test]
@@ -230,7 +482,6 @@ mod tests {
         let long = "a".repeat(3000);
         let result = truncate_content(&long, 2000);
         assert!(result.ends_with("\n\n[...truncated]"));
-        // 2000 'a' chars + "\n\n[...truncated]"
         assert!(result.starts_with(&"a".repeat(2000)));
     }
 }

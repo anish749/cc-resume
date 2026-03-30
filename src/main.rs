@@ -3,6 +3,7 @@ mod config;
 mod exporter;
 mod qmd;
 mod session;
+mod summarizer;
 mod tui;
 mod watcher;
 
@@ -56,6 +57,9 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Setup) => {
             cli::handle_setup().await?;
+        }
+        Some(Commands::Summarize { full }) => {
+            cli::handle_summarize(full).await?;
         }
         None => {
             tui::run().await?;
