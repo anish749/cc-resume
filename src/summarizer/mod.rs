@@ -81,13 +81,26 @@ pub fn read_summary(config: &Config, session_id: &str) -> Option<SessionSummary>
     serde_yaml::from_str(&content).ok()
 }
 
-/// Write a summary to disk.
+/// Write a summary to disk and inject it into the session markdown frontmatter.
 pub fn write_summary(config: &Config, summary: &SessionSummary) -> Result<()> {
+    // Write the standalone summary YAML file
     let dir = config.summaries_dir();
     std::fs::create_dir_all(&dir)?;
     let path = summary_path(config, &summary.session_id);
     let yaml = serde_yaml::to_string(summary)?;
     std::fs::write(&path, yaml)?;
+
+    // Inject summary into the session markdown frontmatter
+    let md_path = config.export_dir().join(format!("{}.md", summary.session_id));
+    if md_path.exists() {
+        crate::exporter::markdown::inject_summary(
+            &md_path,
+            &summary.summary,
+            &summary.topics,
+            &summary.intent,
+        )?;
+    }
+
     Ok(())
 }
 
