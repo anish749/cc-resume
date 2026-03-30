@@ -159,7 +159,7 @@ impl QmdClient {
     pub async fn is_daemon_running(&self) -> bool {
         self.http
             .post(QMD_MCP_URL)
-            .header("Accept", "application/json, text/event-stream")
+            .header("Accept", "application/json")
             .json(&serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": 0,
@@ -196,6 +196,7 @@ impl QmdClient {
         let resp = self
             .http
             .post(QMD_MCP_URL)
+            // Init requires text/event-stream to get session ID in response headers
             .header("Accept", "application/json, text/event-stream")
             .json(&serde_json::json!({
                 "jsonrpc": "2.0",
@@ -217,6 +218,11 @@ impl QmdClient {
             .and_then(|v| v.to_str().ok())
             .map(String::from)
             .ok_or_else(|| anyhow::anyhow!("QMD daemon did not return a session ID"))?;
+
+        // Consume the response body so the connection can be cleanly reused.
+        // Without this, the chunked body stays in the TCP buffer and the next
+        // request on this pooled connection stalls for seconds.
+        let _ = resp.bytes().await;
 
         tracing::debug!("MCP session initialized: {session_id}");
         Ok(session_id)
@@ -240,7 +246,6 @@ impl QmdClient {
     }
 
     /// Search via the QMD MCP daemon HTTP endpoint.
-    /// Uses the daemon's cached models for fast (~4s warm) hybrid search.
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let collection_name = self.config.qmd_collection_name();
         let session_id = self.get_session_id().await.map_err(|e| {

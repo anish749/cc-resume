@@ -59,10 +59,6 @@ impl SummarizeQueue {
         self.inner.lock().await.pop_front()
     }
 
-    pub async fn len(&self) -> usize {
-        self.inner.lock().await.len()
-    }
-
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod exporter;
+mod pipeline;
 mod qmd;
 mod session;
 mod summarizer;
