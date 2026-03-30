@@ -96,7 +96,7 @@ pub fn write_summary(config: &Config, summary: &SessionSummary) -> Result<()> {
     let md_path = config.export_dir().join(format!("{}.md", summary.session_id));
     if md_path.exists() {
         let current_mtime = file_mtime_iso(&md_path)?;
-        if current_mtime == summary.source_mtime {
+        if mtimes_match(&current_mtime, &summary.source_mtime) {
             crate::exporter::markdown::inject_summary(
                 &md_path,
                 &summary.summary,
@@ -134,17 +134,37 @@ fn count_messages_in_str(content: &str) -> usize {
 }
 
 /// Get the mtime of a file as an ISO 8601 string.
+/// Uses microsecond precision to ensure stable string comparison across
+/// platforms and Rust versions.
 pub fn file_mtime_iso(path: &Path) -> Result<String> {
     let metadata = std::fs::metadata(path)?;
     let mtime = metadata.modified()?;
     let dt: DateTime<Utc> = mtime.into();
-    Ok(dt.to_rfc3339())
+    Ok(dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
 }
 
 /// Parse an ISO 8601 string back to SystemTime.
 fn parse_iso_to_system_time(iso: &str) -> Option<SystemTime> {
     let dt = DateTime::parse_from_rfc3339(iso).ok()?;
     Some(SystemTime::from(dt))
+}
+
+/// Compare two RFC 3339 timestamps with tolerance for sub-second precision
+/// differences (e.g., nanosecond vs microsecond formatting).
+fn mtimes_match(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (
+        DateTime::parse_from_rfc3339(a),
+        DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(da), Ok(db)) => {
+            let diff = (da - db).num_milliseconds().unsigned_abs();
+            diff < 2 // less than 2ms tolerance
+        }
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
