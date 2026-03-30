@@ -338,27 +338,18 @@ fn strip_yaml_fences(s: &str) -> String {
 
 /// Extract project_path and date from the YAML frontmatter of a session .md.
 fn extract_frontmatter_fields(md_content: &str) -> (Option<String>, Option<String>) {
-    let mut project_path = None;
-    let mut date = None;
-
-    let in_frontmatter = md_content.starts_with("---");
-    if !in_frontmatter {
-        return (project_path, date);
+    use crate::exporter::markdown::SessionDocument;
+    match SessionDocument::parse(md_content) {
+        Some(doc) => {
+            let pp = if doc.frontmatter.project_path.is_empty() {
+                None
+            } else {
+                Some(doc.frontmatter.project_path)
+            };
+            (pp, doc.frontmatter.date)
+        }
+        None => (None, None),
     }
-
-    for line in md_content.lines().skip(1) {
-        if line.starts_with("---") {
-            break;
-        }
-        if let Some(val) = line.strip_prefix("project_path: ") {
-            project_path = Some(val.trim().trim_matches('"').to_string());
-        }
-        if let Some(val) = line.strip_prefix("date: ") {
-            date = Some(val.trim().trim_matches('"').to_string());
-        }
-    }
-
-    (project_path, date)
 }
 
 /// Extract messages after `skip_count` messages from the markdown body.
@@ -371,16 +362,6 @@ fn extract_messages_after(md_content: &str, skip_count: usize) -> String {
 
     for line in md_content.lines() {
         if !in_body {
-            // Skip frontmatter
-            if line == "---" {
-                // Toggle: first --- starts frontmatter, second --- ends it
-                if in_body {
-                    // shouldn't happen but be safe
-                } else {
-                    // Check if we already saw opening ---
-                    // Simple: just wait for blank line after second ---
-                }
-            }
             // We're past frontmatter once we see the first ## heading
             if line.starts_with("## User") || line.starts_with("## Assistant") {
                 in_body = true;
