@@ -75,12 +75,13 @@ pub fn stop(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Print daemon status.
+/// Print daemon status with summarization stats.
 pub fn status(config: &Config) -> Result<()> {
     match read_pid(config) {
         Some(pid) if process_alive(pid) => {
             println!("Daemon is running (PID: {pid})");
             println!("Log: {}", config.daemon_log_file().display());
+            print_summary_stats(config);
         }
         Some(pid) => {
             println!("Daemon is not running (stale PID {pid}, cleaning up).");
@@ -88,9 +89,32 @@ pub fn status(config: &Config) -> Result<()> {
         }
         None => {
             println!("Daemon is not running.");
+            print_summary_stats(config);
         }
     }
     Ok(())
+}
+
+/// Print session and summarization statistics.
+fn print_summary_stats(config: &Config) {
+    let sessions_dir = config.export_dir();
+    let summaries_dir = config.summaries_dir();
+
+    let session_count = std::fs::read_dir(&sessions_dir)
+        .map(|entries| entries.filter_map(|e| e.ok()).filter(|e| {
+            e.path().extension().and_then(|ext| ext.to_str()) == Some("md")
+        }).count())
+        .unwrap_or(0);
+
+    let summary_count = std::fs::read_dir(&summaries_dir)
+        .map(|entries| entries.filter_map(|e| e.ok()).filter(|e| {
+            e.path().extension().and_then(|ext| ext.to_str()) == Some("yaml")
+        }).count())
+        .unwrap_or(0);
+
+    let below_threshold = session_count.saturating_sub(summary_count);
+
+    println!("\nSessions: {session_count} exported, {summary_count} summarized, {below_threshold} below threshold");
 }
 
 /// Check if the daemon is running.
