@@ -139,7 +139,7 @@ pub async fn handle_summarize(full: bool) -> Result<()> {
         .status()
         .await;
 
-    if claude_check.is_err() || !claude_check.unwrap().success() {
+    if !claude_check.map_or(false, |s| s.success()) {
         anyhow::bail!("Claude CLI is not installed or not on PATH. It's required for summarization.");
     }
 

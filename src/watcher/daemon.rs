@@ -284,7 +284,8 @@ pub async fn run_watcher(config: &Config) -> Result<()> {
                                         "Failed to summarize {}: {e}",
                                         job.session_id
                                     );
-                                    // Re-enqueue for retry on next scan cycle
+                                    // Job is dropped; the next periodic scan will
+                                    // re-discover it if it still needs summarization.
                                 }
                             }
                         }));

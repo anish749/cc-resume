@@ -78,7 +78,7 @@ pub fn summary_path(config: &Config, session_id: &str) -> PathBuf {
 pub fn read_summary(config: &Config, session_id: &str) -> Option<SessionSummary> {
     let path = summary_path(config, session_id);
     let content = std::fs::read_to_string(&path).ok()?;
-    serde_yaml::from_str(&content).ok()
+    serde_yml::from_str(&content).ok()
 }
 
 /// Write a summary to disk and inject it into the session markdown frontmatter.
@@ -87,18 +87,28 @@ pub fn write_summary(config: &Config, summary: &SessionSummary) -> Result<()> {
     let dir = config.summaries_dir();
     std::fs::create_dir_all(&dir)?;
     let path = summary_path(config, &summary.session_id);
-    let yaml = serde_yaml::to_string(summary)?;
+    let yaml = serde_yml::to_string(summary)?;
     std::fs::write(&path, yaml)?;
 
-    // Inject summary into the session markdown frontmatter
+    // Inject summary into the session markdown frontmatter.
+    // Guard against race: if the .md was re-exported (by the file watcher) since
+    // we read it for summarization, skip injection — next cycle will catch it.
     let md_path = config.export_dir().join(format!("{}.md", summary.session_id));
     if md_path.exists() {
-        crate::exporter::markdown::inject_summary(
-            &md_path,
-            &summary.summary,
-            &summary.topics,
-            &summary.intent,
-        )?;
+        let current_mtime = file_mtime_iso(&md_path)?;
+        if current_mtime == summary.source_mtime {
+            crate::exporter::markdown::inject_summary(
+                &md_path,
+                &summary.summary,
+                &summary.topics,
+                &summary.intent,
+            )?;
+        } else {
+            tracing::debug!(
+                "Skipping frontmatter injection for {} — file was modified since summarization",
+                summary.session_id
+            );
+        }
     }
 
     Ok(())
@@ -112,11 +122,15 @@ pub fn write_summary(config: &Config, summary: &SessionSummary) -> Result<()> {
 /// This is a cheap way to get message count without full parsing.
 pub fn count_messages(md_path: &Path) -> Result<usize> {
     let content = std::fs::read_to_string(md_path)?;
-    let count = content
+    Ok(count_messages_in_str(&content))
+}
+
+/// Count message headings in markdown content.
+fn count_messages_in_str(content: &str) -> usize {
+    content
         .lines()
         .filter(|line| *line == "## User" || *line == "## Assistant")
-        .count();
-    Ok(count)
+        .count()
 }
 
 /// Get the mtime of a file as an ISO 8601 string.
@@ -256,7 +270,7 @@ async fn run_incremental_summary(
     existing: &SessionSummary,
     delta_messages: &str,
 ) -> Result<String> {
-    let existing_yaml = serde_yaml::to_string(existing)?;
+    let existing_yaml = serde_yml::to_string(existing)?;
 
     let prompt = format!(
         "Here is the current summary of a Claude Code session:\n\n\
@@ -310,7 +324,7 @@ struct ParsedSummaryResponse {
 /// Parse the YAML response from Claude, stripping markdown fences if present.
 fn parse_summary_yaml(raw: &str) -> Result<ParsedSummaryResponse> {
     let cleaned = strip_yaml_fences(raw);
-    serde_yaml::from_str(&cleaned)
+    serde_yml::from_str(&cleaned)
         .context("Failed to parse summary YAML from Claude CLI output")
 }
 
@@ -438,4 +452,145 @@ pub async fn enqueue_pending(config: &Config, queue: &SummarizeQueue) -> Result<
     }
 
     Ok(enqueued)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_session_md() -> String {
+        "---\nsession_id: test-123\nproject_name: test\nproject_path: /test\n---\n\n\
+         # Session: 2025-04-15 (test-123)\n\n\
+         ## User\n\nFirst question\n\n\
+         ## Assistant\n\nFirst answer\n\n\
+         ## User\n\nSecond question\n\n\
+         ## Assistant\n\nSecond answer\n\n\
+         ## User\n\nThird question\n\n\
+         ## Assistant\n\nThird answer\n\n"
+            .to_string()
+    }
+
+    // --- count_messages_in_str ---
+
+    #[test]
+    fn count_messages_basic() {
+        assert_eq!(count_messages_in_str(&sample_session_md()), 6);
+    }
+
+    #[test]
+    fn count_messages_empty() {
+        assert_eq!(count_messages_in_str(""), 0);
+    }
+
+    #[test]
+    fn count_messages_no_headings() {
+        assert_eq!(count_messages_in_str("just some text\nno headings here"), 0);
+    }
+
+    #[test]
+    fn count_messages_ignores_similar_headings() {
+        let content = "## User\n\n## Assistant\n\n## User-Facing Changes\n\n## Assistant Notes\n\n";
+        // Only exact matches count — "## User-Facing Changes" and "## Assistant Notes" don't
+        assert_eq!(count_messages_in_str(content), 2);
+    }
+
+    // --- extract_messages_after ---
+
+    #[test]
+    fn extract_messages_after_skip_zero() {
+        let md = sample_session_md();
+        let result = extract_messages_after(&md, 0);
+        assert!(result.contains("First question"));
+        assert!(result.contains("Third answer"));
+    }
+
+    #[test]
+    fn extract_messages_after_skip_some() {
+        let md = sample_session_md();
+        let result = extract_messages_after(&md, 4); // skip first 4 messages
+        assert!(!result.contains("First question"));
+        assert!(!result.contains("Second question"));
+        assert!(result.contains("Third question"));
+        assert!(result.contains("Third answer"));
+    }
+
+    #[test]
+    fn extract_messages_after_skip_all() {
+        let md = sample_session_md();
+        let result = extract_messages_after(&md, 100);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_messages_after_skips_frontmatter() {
+        let md = sample_session_md();
+        let result = extract_messages_after(&md, 0);
+        assert!(!result.contains("session_id"));
+        assert!(!result.contains("project_name"));
+    }
+
+    // --- strip_yaml_fences ---
+
+    #[test]
+    fn strip_yaml_fences_with_fence() {
+        let input = "```yaml\ntopics:\n  - hello\nsummary: test\n```";
+        let result = strip_yaml_fences(input);
+        assert_eq!(result, "topics:\n  - hello\nsummary: test");
+    }
+
+    #[test]
+    fn strip_yaml_fences_no_fence() {
+        let input = "topics:\n  - hello\nsummary: test";
+        let result = strip_yaml_fences(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn strip_yaml_fences_bare_backticks() {
+        let input = "```\ntopics:\n  - hello\n```";
+        let result = strip_yaml_fences(input);
+        assert_eq!(result, "topics:\n  - hello");
+    }
+
+    #[test]
+    fn strip_yaml_fences_whitespace() {
+        let input = "  \n```yaml\ncontent\n```\n  ";
+        let result = strip_yaml_fences(input);
+        assert_eq!(result, "content");
+    }
+
+    // --- parse_summary_yaml ---
+
+    #[test]
+    fn parse_summary_yaml_valid() {
+        let yaml = "topics:\n  - Topic one\n  - Topic two\nsummary: A summary\nintent: feature";
+        let result = parse_summary_yaml(yaml).unwrap();
+        assert_eq!(result.topics, vec!["Topic one", "Topic two"]);
+        assert_eq!(result.summary, "A summary");
+        assert_eq!(result.intent, "feature");
+    }
+
+    #[test]
+    fn parse_summary_yaml_with_fences() {
+        let yaml = "```yaml\ntopics:\n  - Topic\nsummary: Sum\nintent: bug-fix\n```";
+        let result = parse_summary_yaml(yaml).unwrap();
+        assert_eq!(result.topics, vec!["Topic"]);
+        assert_eq!(result.intent, "bug-fix");
+    }
+
+    #[test]
+    fn parse_summary_yaml_missing_field() {
+        let yaml = "topics:\n  - Topic\nsummary: Sum";
+        // Missing intent field should fail
+        assert!(parse_summary_yaml(yaml).is_err());
+    }
+
+    #[test]
+    fn parse_summary_yaml_invalid() {
+        assert!(parse_summary_yaml("not: valid: yaml: [[[").is_err());
+    }
 }

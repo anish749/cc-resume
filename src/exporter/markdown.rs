@@ -10,7 +10,7 @@ const MAX_ASSISTANT_CHARS: usize = 2000;
 // ---------------------------------------------------------------------------
 
 /// The typed frontmatter of a session markdown document.
-/// Uses serde_yaml for parsing and rendering — adding a new field is just
+/// Uses serde_yml for parsing and rendering — adding a new field is just
 /// adding a struct field with the right serde attributes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Frontmatter {
@@ -36,6 +36,9 @@ pub(crate) struct Frontmatter {
     pub ai_topics: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_intent: Option<String>,
+    /// Preserve any unknown fields during round-trips (forward compatibility).
+    #[serde(flatten, default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub extra: std::collections::BTreeMap<String, serde_yml::Value>,
 }
 
 /// A complete session markdown document: typed frontmatter + raw body.
@@ -58,13 +61,13 @@ impl SessionDocument {
         let frontmatter_str = &rest[..closing_pos];
         let body = rest[closing_pos + 5..].to_string(); // skip "\n---\n"
 
-        let frontmatter: Frontmatter = serde_yaml::from_str(frontmatter_str).ok()?;
+        let frontmatter: Frontmatter = serde_yml::from_str(frontmatter_str).ok()?;
         Some(Self { frontmatter, body })
     }
 
     /// Render the document back to a markdown string.
     pub fn render(&self) -> String {
-        let yaml = serde_yaml::to_string(&self.frontmatter)
+        let yaml = serde_yml::to_string(&self.frontmatter)
             .expect("Frontmatter serialization should not fail");
 
         let mut out = String::with_capacity(yaml.len() + self.body.len() + 16);
@@ -91,6 +94,7 @@ pub fn render(metadata: &SessionMetadata, messages: &[SessionMessage]) -> String
         ai_summary: None,
         ai_topics: None,
         ai_intent: None,
+        extra: std::collections::BTreeMap::new(),
     };
 
     let mut body = String::with_capacity(8 * 1024);
@@ -448,12 +452,24 @@ mod tests {
     }
 
     #[test]
-    fn parse_tolerates_unknown_fields() {
-        // Simulate a frontmatter with an extra field we don't know about
-        let content = "---\nsession_id: abc\nproject_name: test\nproject_path: /test\nunknown_field: some_value\n---\nbody";
+    fn unknown_fields_preserved_on_roundtrip() {
+        let content = "---\nsession_id: abc\nproject_name: test\nproject_path: /test\ncustom_field: some_value\n---\nbody";
         let doc = SessionDocument::parse(content).unwrap();
         assert_eq!(doc.frontmatter.session_id, "abc");
         assert_eq!(doc.body, "body");
+        assert_eq!(
+            doc.frontmatter.extra.get("custom_field").and_then(|v| v.as_str()),
+            Some("some_value")
+        );
+
+        // Round-trip preserves the unknown field
+        let rendered = doc.render();
+        assert!(rendered.contains("custom_field: some_value"));
+        let reparsed = SessionDocument::parse(&rendered).unwrap();
+        assert_eq!(
+            reparsed.frontmatter.extra.get("custom_field").and_then(|v| v.as_str()),
+            Some("some_value")
+        );
     }
 
     #[test]
