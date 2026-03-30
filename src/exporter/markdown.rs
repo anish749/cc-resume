@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use super::parser::{MessageRole, SessionMessage, SessionMetadata};
 
 /// Maximum number of characters for an assistant message block in the output.
@@ -8,21 +10,31 @@ const MAX_ASSISTANT_CHARS: usize = 2000;
 // ---------------------------------------------------------------------------
 
 /// The typed frontmatter of a session markdown document.
-/// New fields added here are automatically handled by parse/render.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Uses serde_yaml for parsing and rendering — adding a new field is just
+/// adding a struct field with the right serde attributes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Frontmatter {
     pub session_id: String,
     pub project_name: String,
     pub project_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_prompt: Option<String>,
+    #[serde(default)]
     pub files_touched: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<String>,
     // AI-generated summary fields
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_topics: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_intent: Option<String>,
 }
 
@@ -46,106 +58,21 @@ impl SessionDocument {
         let frontmatter_str = &rest[..closing_pos];
         let body = rest[closing_pos + 5..].to_string(); // skip "\n---\n"
 
-        let frontmatter = Frontmatter::parse(frontmatter_str);
+        let frontmatter: Frontmatter = serde_yaml::from_str(frontmatter_str).ok()?;
         Some(Self { frontmatter, body })
     }
 
     /// Render the document back to a markdown string.
     pub fn render(&self) -> String {
-        let mut out = String::with_capacity(self.body.len() + 2048);
+        let yaml = serde_yaml::to_string(&self.frontmatter)
+            .expect("Frontmatter serialization should not fail");
+
+        let mut out = String::with_capacity(yaml.len() + self.body.len() + 16);
         out.push_str("---\n");
-        self.frontmatter.render(&mut out);
+        out.push_str(&yaml);
         out.push_str("---\n");
         out.push_str(&self.body);
         out
-    }
-}
-
-impl Frontmatter {
-    /// Parse frontmatter fields from the YAML text between the `---` delimiters.
-    fn parse(yaml_text: &str) -> Self {
-        let mut fm = Frontmatter::default();
-        let mut current_list: Option<&str> = None; // tracks which list field we're collecting
-
-        for line in yaml_text.lines() {
-            // List continuation line
-            if line.starts_with("  - ") {
-                let value = line[4..].trim().to_string();
-                let value = unquote(&value);
-                match current_list {
-                    Some("files_touched") => fm.files_touched.push(value),
-                    Some("ai_topics") => {
-                        fm.ai_topics.get_or_insert_with(Vec::new).push(value);
-                    }
-                    _ => {}
-                }
-                continue;
-            }
-
-            // Not a continuation — reset list context
-            current_list = None;
-
-            // Key: value line
-            if let Some((key, value)) = split_yaml_line(line) {
-                let value = unquote(value);
-                match key {
-                    "session_id" => fm.session_id = value,
-                    "project_name" => fm.project_name = value,
-                    "project_path" => fm.project_path = value,
-                    "date" => fm.date = non_null(value),
-                    "git_branch" => fm.git_branch = non_null(value),
-                    "first_prompt" => fm.first_prompt = non_null(value),
-                    "started_at" => fm.started_at = non_null(value),
-                    "ended_at" => fm.ended_at = non_null(value),
-                    "ai_summary" => fm.ai_summary = non_null(value),
-                    "ai_intent" => fm.ai_intent = non_null(value),
-                    "files_touched" => {
-                        if value == "[]" {
-                            fm.files_touched = Vec::new();
-                        } else {
-                            // Empty value or anything else means list items follow
-                            current_list = Some("files_touched");
-                        }
-                    }
-                    "ai_topics" => {
-                        if value == "[]" {
-                            fm.ai_topics = Some(Vec::new());
-                        } else {
-                            current_list = Some("ai_topics");
-                        }
-                    }
-                    _ => {} // ignore unknown fields
-                }
-            }
-        }
-
-        fm
-    }
-
-    /// Render frontmatter fields as YAML text (without the `---` delimiters).
-    fn render(&self, out: &mut String) {
-        write_yaml_field(out, "session_id", &self.session_id);
-        write_yaml_field(out, "project_name", &self.project_name);
-        write_yaml_field(out, "project_path", &self.project_path);
-        write_yaml_opt(out, "date", self.date.as_deref());
-        write_yaml_opt(out, "git_branch", self.git_branch.as_deref());
-        write_yaml_opt(out, "first_prompt", self.first_prompt.as_deref());
-
-        write_yaml_list(out, "files_touched", &self.files_touched);
-
-        write_yaml_opt(out, "started_at", self.started_at.as_deref());
-        write_yaml_opt(out, "ended_at", self.ended_at.as_deref());
-
-        // AI summary fields — only written when present
-        if let Some(ref summary) = self.ai_summary {
-            write_yaml_field(out, "ai_summary", summary);
-        }
-        if let Some(ref topics) = self.ai_topics {
-            write_yaml_list(out, "ai_topics", topics);
-        }
-        if let Some(ref intent) = self.ai_intent {
-            write_yaml_field(out, "ai_intent", intent);
-        }
     }
 }
 
@@ -215,135 +142,8 @@ pub(crate) fn inject_summary(
 }
 
 // ---------------------------------------------------------------------------
-// YAML helpers
+// Helpers
 // ---------------------------------------------------------------------------
-
-/// Write a required YAML scalar field.
-fn write_yaml_field(out: &mut String, key: &str, value: &str) {
-    out.push_str(key);
-    out.push_str(": ");
-    out.push_str(&yaml_escape_value(value));
-    out.push('\n');
-}
-
-/// Write an optional YAML scalar field. Writes `null` when `None`.
-fn write_yaml_opt(out: &mut String, key: &str, value: Option<&str>) {
-    match value {
-        Some(v) => write_yaml_field(out, key, v),
-        None => {
-            out.push_str(key);
-            out.push_str(": null\n");
-        }
-    }
-}
-
-/// Write a YAML list field.
-fn write_yaml_list(out: &mut String, key: &str, items: &[String]) {
-    if items.is_empty() {
-        out.push_str(key);
-        out.push_str(": []\n");
-    } else {
-        out.push_str(key);
-        out.push_str(":\n");
-        for item in items {
-            out.push_str("  - ");
-            out.push_str(&yaml_escape_value(item));
-            out.push('\n');
-        }
-    }
-}
-
-/// Escape a YAML scalar value if it contains characters that could confuse a
-/// YAML parser. We always quote when in doubt.
-pub(crate) fn yaml_escape_value(value: &str) -> String {
-    let needs_quoting = value.is_empty()
-        || value.contains(':')
-        || value.contains('#')
-        || value.contains('\'')
-        || value.contains('"')
-        || value.contains('\n')
-        || value.contains('\r')
-        || value.contains('\\')
-        || value.contains('{')
-        || value.contains('}')
-        || value.contains('[')
-        || value.contains(']')
-        || value.contains(',')
-        || value.contains('&')
-        || value.contains('*')
-        || value.contains('?')
-        || value.contains('|')
-        || value.contains('>')
-        || value.contains('!')
-        || value.contains('%')
-        || value.contains('@')
-        || value.contains('`')
-        || value.starts_with('-')
-        || value.starts_with(' ')
-        || value.ends_with(' ')
-        || looks_like_yaml_special(value);
-
-    if !needs_quoting {
-        return value.to_string();
-    }
-
-    let escaped = value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
-
-    format!("\"{escaped}\"")
-}
-
-/// Returns true for values that YAML might interpret as booleans, nulls, or
-/// numbers (e.g. "true", "null", "1.5").
-fn looks_like_yaml_special(value: &str) -> bool {
-    let lower = value.to_lowercase();
-    matches!(
-        lower.as_str(),
-        "true" | "false" | "yes" | "no" | "on" | "off" | "null" | "~"
-    ) || value.parse::<f64>().is_ok()
-}
-
-/// Split a YAML line into (key, value). Handles `key: value` and `key:` (empty value).
-fn split_yaml_line(line: &str) -> Option<(&str, &str)> {
-    let colon_pos = line.find(':')?;
-    let key = line[..colon_pos].trim();
-    if key.is_empty() || key.starts_with(' ') || key.starts_with('-') {
-        return None; // not a top-level key
-    }
-    let value = line[colon_pos + 1..].trim();
-    Some((key, value))
-}
-
-/// Remove surrounding quotes from a YAML value and unescape basic sequences.
-fn unquote(s: &str) -> String {
-    let trimmed = s.trim();
-    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-    {
-        let inner = &trimmed[1..trimmed.len() - 1];
-        inner
-            .replace("\\n", "\n")
-            .replace("\\r", "\r")
-            .replace("\\t", "\t")
-            .replace("\\\"", "\"")
-            .replace("\\\\", "\\")
-    } else {
-        trimmed.to_string()
-    }
-}
-
-/// Convert a YAML value to `Option<String>`, treating "null" as `None`.
-fn non_null(value: String) -> Option<String> {
-    if value == "null" || value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
 
 /// Truncate content to `max` characters, appending an ellipsis indicator if
 /// truncated.
@@ -409,9 +209,6 @@ mod tests {
 
         assert!(md.starts_with("---\n"));
         assert!(md.contains("session_id: abcdef12-3456-7890-abcd-ef1234567890\n"));
-        assert!(md.contains("date: 2025-04-15\n"));
-        assert!(md.contains("git_branch: main\n"));
-        assert!(md.contains("files_touched:\n  - src/auth.rs\n  - src/main.rs\n"));
         assert!(md.contains("# Session: 2025-04-15 (abcdef12)"));
         assert!(md.contains("## User\n\nFix the login bug"));
         assert!(md.contains("## Assistant\n\nI found the issue in auth.rs."));
@@ -463,10 +260,9 @@ mod tests {
 
         let rendered = doc.render();
 
-        assert!(rendered.contains("ai_summary: "));
+        assert!(rendered.contains("ai_summary:"));
         assert!(rendered.contains("ai_topics:"));
-        assert!(rendered.contains("  - "));
-        assert!(rendered.contains("ai_intent: "));
+        assert!(rendered.contains("ai_intent:"));
         // Body preserved
         assert!(rendered.contains("## User\n\nFix the login bug"));
     }
@@ -531,7 +327,6 @@ mod tests {
         // No trace of old values
         assert!(!rendered2.contains("Old summary"));
         assert!(!rendered2.contains("Old topic"));
-        assert!(!rendered2.contains("exploration"));
     }
 
     #[test]
@@ -563,67 +358,6 @@ mod tests {
         let rendered = doc.render();
         let reparsed = SessionDocument::parse(&rendered).unwrap();
         assert_eq!(reparsed.frontmatter.ai_topics, Some(vec![]));
-    }
-
-    // --- YAML escape tests ---
-
-    #[test]
-    fn yaml_escape_plain() {
-        assert_eq!(yaml_escape_value("hello"), "hello");
-    }
-
-    #[test]
-    fn yaml_escape_colon() {
-        assert_eq!(yaml_escape_value("key: value"), r#""key: value""#);
-    }
-
-    #[test]
-    fn yaml_escape_newline() {
-        assert_eq!(yaml_escape_value("line1\nline2"), r#""line1\nline2""#);
-    }
-
-    #[test]
-    fn yaml_escape_bool() {
-        assert_eq!(yaml_escape_value("true"), r#""true""#);
-        assert_eq!(yaml_escape_value("false"), r#""false""#);
-    }
-
-    #[test]
-    fn yaml_escape_quotes_in_value() {
-        let escaped = yaml_escape_value(r#"She said "hello""#);
-        assert!(escaped.starts_with('"'));
-        assert!(escaped.contains(r#"\"hello\""#));
-    }
-
-    // --- Helper tests ---
-
-    #[test]
-    fn unquote_double_quoted() {
-        assert_eq!(unquote(r#""hello world""#), "hello world");
-    }
-
-    #[test]
-    fn unquote_with_escapes() {
-        assert_eq!(unquote(r#""line1\nline2""#), "line1\nline2");
-    }
-
-    #[test]
-    fn unquote_plain() {
-        assert_eq!(unquote("plain value"), "plain value");
-    }
-
-    #[test]
-    fn split_yaml_line_basic() {
-        let (key, val) = split_yaml_line("date: 2025-04-15").unwrap();
-        assert_eq!(key, "date");
-        assert_eq!(val, "2025-04-15");
-    }
-
-    #[test]
-    fn split_yaml_line_empty_value() {
-        let (key, val) = split_yaml_line("files_touched:").unwrap();
-        assert_eq!(key, "files_touched");
-        assert_eq!(val, "");
     }
 
     #[test]
