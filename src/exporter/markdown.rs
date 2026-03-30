@@ -360,6 +360,102 @@ mod tests {
         assert_eq!(reparsed.frontmatter.ai_topics, Some(vec![]));
     }
 
+    // --- Serde roundtrip edge cases ---
+
+    #[test]
+    fn special_characters_in_first_prompt_roundtrip() {
+        let md = render(
+            &SessionMetadata {
+                first_prompt: Some("Fix the bug: it's \"broken\" & won't work\nnewline here".to_string()),
+                ..sample_metadata()
+            },
+            &sample_messages(),
+        );
+        let doc = SessionDocument::parse(&md).unwrap();
+        assert_eq!(
+            doc.frontmatter.first_prompt.as_deref(),
+            Some("Fix the bug: it's \"broken\" & won't work\nnewline here")
+        );
+
+        // Double roundtrip
+        let rendered = doc.render();
+        let doc2 = SessionDocument::parse(&rendered).unwrap();
+        assert_eq!(doc.frontmatter.first_prompt, doc2.frontmatter.first_prompt);
+    }
+
+    #[test]
+    fn special_characters_in_topics_roundtrip() {
+        let md = sample_md();
+        let mut doc = SessionDocument::parse(&md).unwrap();
+
+        let topics = vec![
+            "Debugged the auth: tokens weren't refreshing properly".to_string(),
+            "Fixed \"edge case\" where user's session expired & caused a crash".to_string(),
+            "Refactored code with special chars like {braces}, [brackets], *asterisks*".to_string(),
+        ];
+        doc.frontmatter.ai_topics = Some(topics.clone());
+        doc.frontmatter.ai_summary = Some("Summary with: colons & \"quotes\"".to_string());
+        doc.frontmatter.ai_intent = Some("bug-fix".to_string());
+
+        let rendered = doc.render();
+        let reparsed = SessionDocument::parse(&rendered).unwrap();
+
+        assert_eq!(reparsed.frontmatter.ai_topics.as_ref(), Some(&topics));
+        assert_eq!(
+            reparsed.frontmatter.ai_summary.as_deref(),
+            Some("Summary with: colons & \"quotes\"")
+        );
+    }
+
+    #[test]
+    fn project_path_with_dashes_roundtrip() {
+        let md = render(
+            &SessionMetadata {
+                project_name: "-Users-anish-my-cool-project".to_string(),
+                project_path: "/Users/anish/my-cool-project".to_string(),
+                ..sample_metadata()
+            },
+            &sample_messages(),
+        );
+        let doc = SessionDocument::parse(&md).unwrap();
+        assert_eq!(doc.frontmatter.project_path, "/Users/anish/my-cool-project");
+        assert_eq!(doc.frontmatter.project_name, "-Users-anish-my-cool-project");
+    }
+
+    #[test]
+    fn all_optional_fields_none_roundtrip() {
+        let md = render(
+            &SessionMetadata {
+                session_id: "test-id".to_string(),
+                project_name: "test".to_string(),
+                project_path: "/test".to_string(),
+                date: None,
+                git_branch: None,
+                first_prompt: None,
+                files_touched: vec![],
+                started_at: None,
+                ended_at: None,
+            },
+            &sample_messages(),
+        );
+        let doc = SessionDocument::parse(&md).unwrap();
+        assert!(doc.frontmatter.date.is_none());
+        assert!(doc.frontmatter.git_branch.is_none());
+        assert!(doc.frontmatter.first_prompt.is_none());
+        assert!(doc.frontmatter.started_at.is_none());
+        assert!(doc.frontmatter.ended_at.is_none());
+        assert!(doc.frontmatter.ai_summary.is_none());
+    }
+
+    #[test]
+    fn parse_tolerates_unknown_fields() {
+        // Simulate a frontmatter with an extra field we don't know about
+        let content = "---\nsession_id: abc\nproject_name: test\nproject_path: /test\nunknown_field: some_value\n---\nbody";
+        let doc = SessionDocument::parse(content).unwrap();
+        assert_eq!(doc.frontmatter.session_id, "abc");
+        assert_eq!(doc.body, "body");
+    }
+
     #[test]
     fn truncate_content_short() {
         assert_eq!(truncate_content("short", 100), "short");
