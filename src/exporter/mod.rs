@@ -80,6 +80,7 @@ pub async fn export_all(config: &Config, full: bool) -> Result<ExportStats> {
 }
 
 /// Export a single session, replacing the output file if it already exists.
+/// Preserves any existing AI summary fields from the previous markdown.
 pub fn export_session(
     jsonl_path: &Path,
     output_path: &Path,
@@ -92,8 +93,26 @@ pub fn export_session(
         return Ok(());
     }
 
+    // Read existing AI summary fields before overwriting.
+    let existing_ai = std::fs::read_to_string(output_path)
+        .ok()
+        .and_then(|content| markdown::SessionDocument::parse(&content))
+        .map(|doc| (doc.frontmatter.ai_summary, doc.frontmatter.ai_topics, doc.frontmatter.ai_intent));
+
     let metadata = parser::extract_metadata(&parsed, project_name, session_id);
-    let md = markdown::render(&metadata, &parsed.messages);
+    let mut md = markdown::render(&metadata, &parsed.messages);
+
+    // Restore AI summary fields into the freshly rendered markdown.
+    if let Some((ai_summary, ai_topics, ai_intent)) = existing_ai {
+        if ai_summary.is_some() || ai_topics.is_some() || ai_intent.is_some() {
+            if let Some(mut doc) = markdown::SessionDocument::parse(&md) {
+                doc.frontmatter.ai_summary = ai_summary;
+                doc.frontmatter.ai_topics = ai_topics;
+                doc.frontmatter.ai_intent = ai_intent;
+                md = doc.render();
+            }
+        }
+    }
 
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)?;

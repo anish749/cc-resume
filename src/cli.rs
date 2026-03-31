@@ -55,12 +55,6 @@ pub async fn handle_search(query: &str, limit: usize) -> Result<()> {
     let config = crate::config::Config::load()?;
     let qmd = crate::qmd::QmdClient::new(&config);
 
-    if !qmd.is_installed() {
-        anyhow::bail!(
-            "QMD is not installed. Run `claude-resume setup` for guided installation."
-        );
-    }
-
     let results = qmd.search(query, limit).await?;
 
     if results.is_empty() {
