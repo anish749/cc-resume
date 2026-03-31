@@ -248,13 +248,16 @@ impl QmdClient {
     /// Search via the QMD MCP daemon HTTP endpoint.
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         let collection_name = self.config.qmd_collection_name();
+        let t_session = std::time::Instant::now();
         let session_id = self.get_session_id().await.map_err(|e| {
             tracing::warn!("Failed to get MCP session: {e}");
             QmdError::DaemonNotRunning
         })?;
+        tracing::info!("get_session_id: {:?}", t_session.elapsed());
 
-        tracing::debug!("MCP search: query={query:?} collection={collection_name} limit={limit}");
+        tracing::info!("MCP search: query={query:?} collection={collection_name} limit={limit}");
 
+        let t_http = std::time::Instant::now();
         let resp = self
             .http
             .post(QMD_MCP_URL)
@@ -281,12 +284,14 @@ impl QmdClient {
             .await
             .map_err(|e| QmdError::SearchFailed(format!("HTTP request failed: {e}")))?;
 
+        tracing::info!("HTTP send: {:?}", t_http.elapsed());
+
+        let t_body = std::time::Instant::now();
         let body: serde_json::Value = resp
             .json()
             .await
             .map_err(|e| QmdError::SearchFailed(format!("Failed to parse response: {e}")))?;
-
-        tracing::debug!("MCP response received");
+        tracing::info!("HTTP body read: {:?}", t_body.elapsed());
 
         // Check for JSON-RPC error
         if let Some(error) = body.get("error") {
