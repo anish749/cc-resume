@@ -197,11 +197,8 @@ impl App {
             if let Some(ref file_path) = result.file_path {
                 match std::fs::read_to_string(file_path) {
                     Ok(content) => {
-                        // Re-render through the typed document so frontmatter
-                        // field order always matches the struct definition,
-                        // regardless of what's on disk.
                         let normalized = SessionDocument::parse(&content)
-                            .map(|doc| doc.render())
+                            .map(|doc| doc.render_preview())
                             .unwrap_or(content);
                         self.preview_content = Some(normalized);
                     }

@@ -65,6 +65,67 @@ impl SessionDocument {
         Some(Self { frontmatter, body })
     }
 
+    /// Render a display-optimized preview for the TUI.
+    /// Shows only the fields that matter for quick scanning, in priority order.
+    pub fn render_preview(&self) -> String {
+        let fm = &self.frontmatter;
+        let mut out = String::with_capacity(4096);
+
+        // Project path as heading
+        out.push_str(&format!("# {}\n", fm.project_path));
+
+        // Date: range if start/end differ, single otherwise
+        let start = fm.started_at.as_deref().and_then(|s| s.get(..10));
+        let end = fm.ended_at.as_deref().and_then(|s| s.get(..10));
+        match (start, end) {
+            (Some(s), Some(e)) if s != e => out.push_str(&format!("{s} → {e}\n")),
+            (Some(s), _) => out.push_str(&format!("{s}\n")),
+            (None, _) => {
+                if let Some(ref d) = fm.date {
+                    out.push_str(&format!("{d}\n"));
+                }
+            }
+        }
+
+        // AI summary
+        if let Some(ref summary) = fm.ai_summary {
+            out.push_str(&format!("\n## Summary\n{summary}\n"));
+        }
+
+        // AI topics
+        if let Some(ref topics) = fm.ai_topics {
+            if !topics.is_empty() {
+                out.push_str("\n## Topics\n");
+                for t in topics {
+                    out.push_str(&format!("- {t}\n"));
+                }
+            }
+        }
+
+        // AI intent
+        if let Some(ref intent) = fm.ai_intent {
+            out.push_str(&format!("\nIntent: {intent}\n"));
+        }
+
+        // First prompt
+        if let Some(ref prompt) = fm.first_prompt {
+            out.push_str(&format!("\n## First Prompt\n{prompt}\n"));
+        }
+
+        // Files touched
+        if !fm.files_touched.is_empty() {
+            out.push_str("\n## Files Touched\n");
+            for f in &fm.files_touched {
+                out.push_str(&format!("- {f}\n"));
+            }
+        }
+
+        // Separator, then session body
+        out.push_str("\n---\n");
+        out.push_str(&self.body);
+        out
+    }
+
     /// Render the document back to a markdown string.
     pub fn render(&self) -> String {
         let yaml = serde_yml::to_string(&self.frontmatter)
@@ -522,6 +583,115 @@ ai_intent: bug-fix
         assert_eq!(reparsed.frontmatter.files_touched, vec!["src/main.rs", "src/lib.rs"]);
         assert_eq!(reparsed.frontmatter.ai_intent.as_deref(), Some("bug-fix"));
     }
+
+    // --- Preview rendering tests ---
+
+    #[test]
+    fn preview_shows_project_path_as_heading() {
+        let doc = SessionDocument::parse(&sample_md()).unwrap();
+        let preview = doc.render_preview();
+        assert!(preview.starts_with("# /Users/anish/git/myproj\n"));
+    }
+
+    #[test]
+    fn preview_shows_single_date_when_same_day() {
+        let doc = SessionDocument::parse(&sample_md()).unwrap();
+        // started_at and ended_at are both 2025-04-15
+        let preview = doc.render_preview();
+        assert!(preview.contains("2025-04-15\n"));
+        assert!(!preview.contains("→"));
+    }
+
+    #[test]
+    fn preview_shows_date_range_when_different_days() {
+        let md = render(
+            &SessionMetadata {
+                started_at: Some("2025-04-15T10:00:00Z".to_string()),
+                ended_at: Some("2025-04-17T14:00:00Z".to_string()),
+                ..sample_metadata()
+            },
+            &sample_messages(),
+        );
+        let doc = SessionDocument::parse(&md).unwrap();
+        let preview = doc.render_preview();
+        assert!(preview.contains("2025-04-15 → 2025-04-17\n"));
+    }
+
+    #[test]
+    fn preview_hides_session_id_project_name_git_branch() {
+        let doc = SessionDocument::parse(&sample_md()).unwrap();
+        let preview = doc.render_preview();
+        assert!(!preview.contains("session_id"));
+        assert!(!preview.contains("project_name"));
+        assert!(!preview.contains("git_branch"));
+        assert!(!preview.contains("started_at"));
+        assert!(!preview.contains("ended_at"));
+    }
+
+    #[test]
+    fn preview_shows_ai_fields_before_first_prompt() {
+        let mut doc = SessionDocument::parse(&sample_md()).unwrap();
+        doc.frontmatter.ai_summary = Some("Fixed auth bug".to_string());
+        doc.frontmatter.ai_topics = Some(vec!["auth".to_string(), "tokens".to_string()]);
+        doc.frontmatter.ai_intent = Some("bug-fix".to_string());
+
+        let preview = doc.render_preview();
+
+        let summary_pos = preview.find("## Summary").unwrap();
+        let topics_pos = preview.find("## Topics").unwrap();
+        let prompt_pos = preview.find("## First Prompt").unwrap();
+        let files_pos = preview.find("## Files Touched").unwrap();
+
+        assert!(summary_pos < topics_pos);
+        assert!(topics_pos < prompt_pos);
+        assert!(prompt_pos < files_pos);
+    }
+
+    #[test]
+    fn preview_omits_missing_optional_sections() {
+        let md = render(
+            &SessionMetadata {
+                first_prompt: None,
+                files_touched: vec![],
+                ..sample_metadata()
+            },
+            &sample_messages(),
+        );
+        let doc = SessionDocument::parse(&md).unwrap();
+        let preview = doc.render_preview();
+
+        assert!(!preview.contains("## Summary"));
+        assert!(!preview.contains("## Topics"));
+        assert!(!preview.contains("Intent:"));
+        assert!(!preview.contains("## First Prompt"));
+        assert!(!preview.contains("## Files Touched"));
+    }
+
+    #[test]
+    fn preview_includes_session_body() {
+        let doc = SessionDocument::parse(&sample_md()).unwrap();
+        let preview = doc.render_preview();
+        assert!(preview.contains("## User\n\nFix the login bug"));
+        assert!(preview.contains("## Assistant\n\nI found the issue in auth.rs."));
+    }
+
+    #[test]
+    fn preview_falls_back_to_date_field_when_no_timestamps() {
+        let md = render(
+            &SessionMetadata {
+                date: Some("2025-04-15".to_string()),
+                started_at: None,
+                ended_at: None,
+                ..sample_metadata()
+            },
+            &sample_messages(),
+        );
+        let doc = SessionDocument::parse(&md).unwrap();
+        let preview = doc.render_preview();
+        assert!(preview.contains("2025-04-15\n"));
+    }
+
+    // --- Truncation tests ---
 
     #[test]
     fn truncate_content_short() {
