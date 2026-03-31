@@ -215,7 +215,9 @@ pub async fn handle_setup() -> Result<()> {
 
     // Step 3: Initial index
     println!("\nThis will index all your existing Claude Code sessions.");
-    println!("Sessions are stored in: {}", config.claude_projects_dir().display());
+    for dir in config.claude_projects_dirs() {
+        println!("  Source: {}", dir.display());
+    }
     println!("Exported markdown will go to: {}", config.export_dir().display());
     println!("\nIndexing...");
 

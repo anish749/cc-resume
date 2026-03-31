@@ -23,16 +23,24 @@ struct StaleSession {
 
 /// Run the full indexing pipeline. Returns the number of sessions exported.
 pub async fn run(config: &Config) -> Result<usize> {
-    let projects_dir = config.claude_projects_dir();
+    let projects_dirs = config.claude_projects_dirs();
     let export_dir = config.export_dir();
 
-    // Step 1: Scan for stale sessions by mtime comparison.
-    let stale = scan_stale(&projects_dir, &export_dir);
+    // Step 1: Scan for stale sessions across all registered source dirs.
+    let mut stale = Vec::new();
+    let mut seen_sessions = std::collections::HashSet::new();
+    for projects_dir in &projects_dirs {
+        for session in scan_stale(projects_dir, &export_dir) {
+            if seen_sessions.insert(session.session_id.clone()) {
+                stale.push(session);
+            }
+        }
+    }
     if stale.is_empty() {
-        tracing::debug!("No stale sessions found");
+        tracing::debug!("No stale sessions found (scanned {} source dirs)", projects_dirs.len());
         return Ok(0);
     }
-    tracing::info!("Found {} stale sessions", stale.len());
+    tracing::info!("Found {} stale sessions across {} source dirs", stale.len(), projects_dirs.len());
 
     // Step 2: Export stale JSONLs to markdown (preserves existing AI summaries).
     let exported = export(config, &stale);
