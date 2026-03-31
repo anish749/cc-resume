@@ -98,7 +98,7 @@ impl App {
                 self.last_search_time = Some(response.elapsed);
                 match response.result {
                     Ok(results) => {
-                        tracing::info!(
+                        tracing::debug!(
                             "Got {} results in {:.3}s (gen={})",
                             results.len(),
                             response.elapsed.as_secs_f64(),
@@ -175,7 +175,7 @@ impl App {
         // and block the new request.
         if let Some(handle) = self.inflight_search.take() {
             handle.abort();
-            tracing::info!("Aborted in-flight search");
+            tracing::debug!("Aborted in-flight search");
         }
 
         let query = self.search_input.trim().to_string();
@@ -187,7 +187,7 @@ impl App {
 
         self.searching = true;
         let generation = self.search_generation;
-        tracing::info!("Spawning search: query={search_query:?} gen={generation}");
+        tracing::debug!("Spawning search: query={search_query:?} gen={generation}");
         let qmd = Arc::clone(&self.qmd);
         let tx = self.search_tx.clone();
 

@@ -16,7 +16,7 @@ pub async fn run() -> Result<()> {
         crate::watcher::start_daemon(&config).await?;
     }
 
-    tracing::info!("TUI startup: {:?}", t0.elapsed());
+    tracing::debug!("TUI startup: {:?}", t0.elapsed());
 
     let mut terminal = ui::setup_terminal()?;
     let result = app::App::new(qmd).run(&mut terminal).await;

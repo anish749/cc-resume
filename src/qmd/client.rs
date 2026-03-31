@@ -253,9 +253,9 @@ impl QmdClient {
             tracing::warn!("Failed to get MCP session: {e}");
             QmdError::DaemonNotRunning
         })?;
-        tracing::info!("get_session_id: {:?}", t_session.elapsed());
+        tracing::debug!("get_session_id: {:?}", t_session.elapsed());
 
-        tracing::info!("MCP search: query={query:?} collection={collection_name} limit={limit}");
+        tracing::debug!("MCP search: query={query:?} collection={collection_name} limit={limit}");
 
         let t_http = std::time::Instant::now();
         let resp = self
@@ -284,14 +284,14 @@ impl QmdClient {
             .await
             .map_err(|e| QmdError::SearchFailed(format!("HTTP request failed: {e}")))?;
 
-        tracing::info!("HTTP send: {:?}", t_http.elapsed());
+        tracing::debug!("HTTP send: {:?}", t_http.elapsed());
 
         let t_body = std::time::Instant::now();
         let body: serde_json::Value = resp
             .json()
             .await
             .map_err(|e| QmdError::SearchFailed(format!("Failed to parse response: {e}")))?;
-        tracing::info!("HTTP body read: {:?}", t_body.elapsed());
+        tracing::debug!("HTTP body read: {:?}", t_body.elapsed());
 
         // Check for JSON-RPC error
         if let Some(error) = body.get("error") {
