@@ -514,6 +514,17 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::raw("")
         };
 
+        // Right-aligned daemon status
+        let daemon_span = Span::styled(
+            &app.daemon_status,
+            Style::default().fg(Color::DarkGray),
+        );
+        let left_len = 40_u16; // approximate left content width
+        let daemon_len = app.daemon_status.len() as u16;
+        let padding = area
+            .width
+            .saturating_sub(left_len + daemon_len + 1);
+
         Line::from(vec![
             mode_indicator,
             search_status,
@@ -522,10 +533,10 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(" switch  "),
             Span::styled("[←/→]", Style::default().fg(Color::Yellow)),
             Span::raw(" pane  "),
-            Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
-            Span::raw(" select  "),
             Span::styled("[Esc]", Style::default().fg(Color::Yellow)),
             Span::raw(" quit"),
+            Span::raw(" ".repeat(padding as usize)),
+            daemon_span,
         ])
     };
 
