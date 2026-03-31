@@ -15,7 +15,7 @@ use ratatui::{
     Frame, Terminal,
 };
 
-use super::app::{App, AppMode};
+use super::app::{App, AppMode, FocusPane};
 
 /// Initialize the terminal for TUI rendering.
 pub fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -103,21 +103,26 @@ fn draw_search_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(search_paragraph, area);
 }
 
-/// Draw the main content area: results list + preview pane.
+/// Draw the main content area: folders + results list + preview pane.
 fn draw_content(f: &mut Frame, app: &App, area: Rect) {
-    // Horizontal split: results (50%) | preview (50%)
+    // 3-pane horizontal split: folders (20%) | results (40%) | preview (40%)
     let content_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(20),
+            Constraint::Percentage(40),
+            Constraint::Percentage(40),
+        ])
         .split(area);
 
-    draw_results(f, app, content_chunks[0]);
-    draw_preview(f, app, content_chunks[1]);
+    draw_folders(f, app, content_chunks[0]);
+    draw_results(f, app, content_chunks[1]);
+    draw_preview(f, app, content_chunks[2]);
 }
 
-/// Draw the results list.
-fn draw_results(f: &mut Frame, app: &App, area: Rect) {
-    let is_active = app.mode == AppMode::Results;
+/// Draw the folder sidebar.
+fn draw_folders(f: &mut Frame, app: &App, area: Rect) {
+    let is_active = app.mode == AppMode::Results && app.focus == FocusPane::Folders;
 
     let border_style = if is_active {
         Style::default().fg(Color::Cyan)
@@ -125,12 +130,125 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
 
+    let folders_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(" Projects ");
+
+    if app.results.is_empty() {
+        let paragraph = Paragraph::new("")
+            .block(folders_block)
+            .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(paragraph, area);
+        return;
+    }
+
+    let visible_rows = app.folder_tree.visible_rows();
+    let max_width = area.width.saturating_sub(2) as usize;
+
+    let mut items: Vec<ListItem> = Vec::with_capacity(visible_rows.len() + 1);
+
+    // "All" row (index 0)
+    {
+        let is_cursor = app.folder_cursor == 0;
+        let is_filter = app.active_filter.is_none();
+        let marker = if is_cursor { "> " } else { "  " };
+        let check = if is_filter { " ✓" } else { "" };
+        let label = format!(
+            "{marker}All ({}){}",
+            app.folder_tree.total_count, check
+        );
+
+        let style = if is_cursor {
+            Style::default()
+                .bg(Color::DarkGray)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else if is_filter {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+
+        items.push(ListItem::new(Line::from(Span::styled(label, style))));
+    }
+
+    // Tree rows
+    for (i, row) in visible_rows.iter().enumerate() {
+        let cursor_idx = i + 1; // offset by 1 for "All" row
+        let is_cursor = app.folder_cursor == cursor_idx;
+        let is_filter = app
+            .active_filter
+            .as_ref()
+            .is_some_and(|f| *f == row.full_path);
+
+        let marker = if is_cursor { "> " } else { "  " };
+        let indent = "  ".repeat(row.depth);
+        let arrow = if row.has_children {
+            if row.expanded { "▾ " } else { "▸ " }
+        } else {
+            "· " // leaf indicator for visual hierarchy
+        };
+        let check = if is_filter { " ✓" } else { "" };
+
+        let label = format!(
+            "{marker}{indent}{arrow}{} ({}){}",
+            row.name, row.total_count, check
+        );
+        let label = truncate_str(&label, max_width);
+
+        let style = if is_cursor {
+            Style::default()
+                .bg(Color::DarkGray)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else if is_filter {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+
+        items.push(ListItem::new(Line::from(Span::styled(label, style))));
+    }
+
+    // Scroll to keep cursor visible
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let scroll_offset = if visible_height == 0 {
+        0
+    } else if app.folder_cursor >= visible_height {
+        app.folder_cursor - visible_height + 1
+    } else {
+        0
+    };
+
+    let visible_items: Vec<ListItem> = items.into_iter().skip(scroll_offset).collect();
+    let list = List::new(visible_items).block(folders_block);
+    f.render_widget(list, area);
+}
+
+/// Draw the results list.
+fn draw_results(f: &mut Frame, app: &App, area: Rect) {
+    let is_active = app.mode == AppMode::Results && app.focus == FocusPane::Results;
+
+    let border_style = if is_active {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let title = if let Some(ref filter) = app.active_filter {
+        let short = filter.rsplit('/').next().unwrap_or(filter);
+        format!(" Results ({}) — {} ", app.filtered_indices.len(), short)
+    } else {
+        format!(" Results ({}) ", app.filtered_indices.len())
+    };
+
     let results_block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(format!(" Results ({}) ", app.results.len()));
+        .title(title);
 
-    if app.results.is_empty() {
+    if app.filtered_indices.is_empty() {
         let empty_msg = if app.search_input.is_empty() {
             "Type to search sessions..."
         } else {
@@ -144,10 +262,11 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let items: Vec<ListItem> = app
-        .results
+        .filtered_indices
         .iter()
         .enumerate()
-        .map(|(i, result)| {
+        .map(|(i, &result_idx)| {
+            let result = &app.results[result_idx];
             let is_selected = i == app.selected_index;
 
             // Score as percentage
@@ -157,7 +276,7 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
             let date_str = result
                 .date
                 .as_deref()
-                .unwrap_or("???")
+                .unwrap_or("no date")
                 .chars()
                 .take(10)
                 .collect::<String>();
@@ -371,10 +490,16 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 " SEARCH ",
                 Style::default().bg(Color::Cyan).fg(Color::Black),
             ),
-            AppMode::Results => Span::styled(
-                " RESULTS ",
-                Style::default().bg(Color::Green).fg(Color::Black),
-            ),
+            AppMode::Results => {
+                let label = match app.focus {
+                    FocusPane::Folders => " PROJECTS ",
+                    FocusPane::Results => " RESULTS ",
+                };
+                Span::styled(
+                    label,
+                    Style::default().bg(Color::Green).fg(Color::Black),
+                )
+            }
         };
 
         let search_status = if app.searching {
@@ -395,14 +520,12 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(" "),
             Span::styled("[Tab]", Style::default().fg(Color::Yellow)),
             Span::raw(" switch  "),
+            Span::styled("[←/→]", Style::default().fg(Color::Yellow)),
+            Span::raw(" pane  "),
             Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
-            Span::raw(" resume  "),
+            Span::raw(" select  "),
             Span::styled("[Esc]", Style::default().fg(Color::Yellow)),
-            Span::raw(" quit  "),
-            Span::styled("[Up/Down]", Style::default().fg(Color::Yellow)),
-            Span::raw(" navigate  "),
-            Span::styled("[PgUp/PgDn]", Style::default().fg(Color::Yellow)),
-            Span::raw(" scroll"),
+            Span::raw(" quit"),
         ])
     };
 

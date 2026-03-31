@@ -1,4 +1,5 @@
 mod app;
+mod folder_tree;
 mod input;
 mod ui;
 

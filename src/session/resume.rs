@@ -8,15 +8,17 @@ use crate::qmd::SearchResult;
 /// Reads the session_id and project_path from the result's frontmatter,
 /// then invokes `claude --resume <session_id>` in the correct directory.
 pub fn resume_session(result: &SearchResult) -> Result<()> {
+    let file = result.file_path.as_deref().unwrap_or("<unknown>");
+
     let session_id = result
         .session_id
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("No session_id found in result frontmatter"))?;
+        .ok_or_else(|| anyhow::anyhow!("No session_id in frontmatter of {file}"))?;
 
     let project_path = result
         .project_path
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("No project_path found in result frontmatter"))?;
+        .ok_or_else(|| anyhow::anyhow!("No project_path in frontmatter of {file}"))?;
 
     // Decode the project name back to a path.
     // Claude stores projects as "-Users-anish-git-foo" → "/Users/anish/git/foo"

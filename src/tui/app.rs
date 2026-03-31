@@ -11,6 +11,7 @@ use tokio::time::Instant;
 use crate::exporter::markdown::SessionDocument;
 use crate::qmd::{QmdClient, SearchResult};
 
+use super::folder_tree::FolderTree;
 use super::input::{self, InputAction};
 use super::ui;
 
@@ -35,6 +36,17 @@ pub struct App {
     pub result_count: usize,
     pub preview_scroll: u16,
 
+    // Folder sidebar state
+    pub folder_tree: FolderTree,
+    /// Index into visible_rows() for the folder cursor.
+    pub folder_cursor: usize,
+    /// The project path prefix used as the active filter, or None for "All".
+    pub active_filter: Option<String>,
+    /// Indices into `self.results` that match the active filter.
+    pub filtered_indices: Vec<usize>,
+    /// Which pane has focus when in browse mode.
+    pub focus: FocusPane,
+
     search_debounce: Option<Instant>,
     search_generation: u64,
     search_rx: mpsc::UnboundedReceiver<SearchResponse>,
@@ -46,6 +58,12 @@ pub struct App {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
     Search,
+    Results,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusPane {
+    Folders,
     Results,
 }
 
@@ -66,6 +84,11 @@ impl App {
             searching: false,
             last_search_time: None,
             result_count: 0,
+            folder_tree: FolderTree::build(&[]),
+            folder_cursor: 0,
+            active_filter: None,
+            filtered_indices: Vec::new(),
+            focus: FocusPane::Results,
             search_debounce: None,
             search_generation: 0,
             search_rx,
@@ -96,12 +119,8 @@ impl App {
                         self.result_count = results.len();
                         self.results = results;
                         self.status_message = None;
-                        if self.selected_index >= self.results.len() && !self.results.is_empty() {
-                            self.selected_index = self.results.len() - 1;
-                        }
-                        if self.results.is_empty() {
-                            self.selected_index = 0;
-                        }
+                        self.rebuild_folders();
+                        self.apply_filter();
                         self.load_preview();
                     }
                     Err(e) => {
@@ -134,14 +153,15 @@ impl App {
                                 self.search_generation += 1;
                             }
                             InputAction::ResumeSelected => {
-                                if let Some(result) = self.results.get(self.selected_index) {
-                                    ui::restore_terminal()?;
-                                    crate::session::resume_session(result)?;
-                                    return Ok(());
-                                } else {
-                                    self.status_message =
-                                        Some("No session selected to resume.".to_string());
+                                if let Some(&ri) = self.filtered_indices.get(self.selected_index) {
+                                    if let Some(result) = self.results.get(ri) {
+                                        ui::restore_terminal()?;
+                                        crate::session::resume_session(result)?;
+                                        return Ok(());
+                                    }
                                 }
+                                self.status_message =
+                                    Some("No session selected to resume.".to_string());
                             }
                             InputAction::Quit => {
                                 self.should_quit = true;
@@ -193,7 +213,11 @@ impl App {
 
     pub fn load_preview(&mut self) {
         self.preview_scroll = 0;
-        if let Some(result) = self.results.get(self.selected_index) {
+        let result = self
+            .filtered_indices
+            .get(self.selected_index)
+            .and_then(|&ri| self.results.get(ri));
+        if let Some(result) = result {
             if let Some(ref file_path) = result.file_path {
                 match std::fs::read_to_string(file_path) {
                     Ok(content) => {
@@ -221,16 +245,109 @@ impl App {
     }
 
     pub fn select_next(&mut self) {
-        if !self.results.is_empty() {
-            self.selected_index = (self.selected_index + 1).min(self.results.len() - 1);
+        if !self.filtered_indices.is_empty() {
+            self.selected_index =
+                (self.selected_index + 1).min(self.filtered_indices.len() - 1);
             self.load_preview();
         }
     }
 
     pub fn select_previous(&mut self) {
-        if !self.results.is_empty() {
+        if !self.filtered_indices.is_empty() {
             self.selected_index = self.selected_index.saturating_sub(1);
             self.load_preview();
+        }
+    }
+
+    /// Rebuild the folder tree from current results.
+    fn rebuild_folders(&mut self) {
+        let paths: Vec<Option<String>> = self
+            .results
+            .iter()
+            .map(|r| r.project_path.clone())
+            .collect();
+        self.folder_tree = FolderTree::build(&paths);
+        // Keep folder_cursor in bounds.
+        let visible = self.folder_tree.visible_rows();
+        // +1 for the "All" row which is virtual (not in the tree).
+        let max = visible.len(); // 0 = "All", 1..=len = tree rows
+        if self.folder_cursor > max {
+            self.folder_cursor = 0;
+        }
+    }
+
+    /// Recompute filtered_indices based on the active folder filter.
+    pub fn apply_filter(&mut self) {
+        self.filtered_indices = match &self.active_filter {
+            None => (0..self.results.len()).collect(),
+            Some(prefix) => self
+                .results
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| {
+                    r.project_path.as_ref().is_some_and(|p| p.starts_with(prefix.as_str()))
+                })
+                .map(|(i, _)| i)
+                .collect(),
+        };
+        // Reset result selection.
+        if self.filtered_indices.is_empty() {
+            self.selected_index = 0;
+        } else if self.selected_index >= self.filtered_indices.len() {
+            self.selected_index = self.filtered_indices.len() - 1;
+        }
+    }
+
+    /// Set the active folder filter from the currently selected folder row.
+    pub fn set_folder_filter(&mut self) {
+        let visible = self.folder_tree.visible_rows();
+        if self.folder_cursor == 0 {
+            // "All" row
+            self.active_filter = None;
+        } else if let Some(row) = visible.get(self.folder_cursor - 1) {
+            self.active_filter = Some(row.full_path.clone());
+        }
+        self.apply_filter();
+        self.load_preview();
+    }
+
+    pub fn folder_select_next(&mut self) {
+        let visible = self.folder_tree.visible_rows();
+        let max = visible.len(); // 0=All, 1..=len
+        if self.folder_cursor < max {
+            self.folder_cursor += 1;
+        }
+    }
+
+    pub fn folder_select_previous(&mut self) {
+        self.folder_cursor = self.folder_cursor.saturating_sub(1);
+    }
+
+    pub fn folder_expand(&mut self) {
+        let visible = self.folder_tree.visible_rows();
+        if self.folder_cursor > 0 {
+            if let Some(row) = visible.get(self.folder_cursor - 1) {
+                if row.has_children {
+                    let path = row.tree_path.clone();
+                    self.folder_tree.expand(&path);
+                }
+            }
+        }
+    }
+
+    pub fn folder_collapse(&mut self) {
+        let visible = self.folder_tree.visible_rows();
+        if self.folder_cursor > 0 {
+            if let Some(row) = visible.get(self.folder_cursor - 1) {
+                let path = row.tree_path.clone();
+                self.folder_tree.collapse(&path);
+                // Keep cursor in bounds after collapse.
+                let new_visible = self.folder_tree.visible_rows();
+                let max = new_visible.len();
+                if self.folder_cursor > max {
+                    self.folder_cursor = max;
+                }
+            }
         }
     }
 }

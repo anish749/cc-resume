@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::{App, AppMode};
+use super::app::{App, AppMode, FocusPane};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputAction {
@@ -18,7 +18,10 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> InputAction {
 
     match app.mode {
         AppMode::Search => handle_search_mode(app, key),
-        AppMode::Results => handle_results_mode(app, key),
+        AppMode::Results => match app.focus {
+            FocusPane::Results => handle_results_mode(app, key),
+            FocusPane::Folders => handle_folders_mode(app, key),
+        },
     }
 }
 
@@ -29,6 +32,7 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> InputAction {
         KeyCode::Tab => {
             if !app.results.is_empty() {
                 app.mode = AppMode::Results;
+                app.focus = FocusPane::Results;
             }
             InputAction::None
         }
@@ -36,6 +40,7 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> InputAction {
         KeyCode::Enter => {
             if !app.results.is_empty() {
                 app.mode = AppMode::Results;
+                app.focus = FocusPane::Results;
             }
             InputAction::None
         }
@@ -43,6 +48,7 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> InputAction {
         KeyCode::Up => {
             if !app.results.is_empty() {
                 app.mode = AppMode::Results;
+                app.focus = FocusPane::Results;
                 app.select_previous();
             }
             InputAction::None
@@ -51,6 +57,7 @@ fn handle_search_mode(app: &mut App, key: KeyEvent) -> InputAction {
         KeyCode::Down => {
             if !app.results.is_empty() {
                 app.mode = AppMode::Results;
+                app.focus = FocusPane::Results;
                 app.select_next();
             }
             InputAction::None
@@ -140,6 +147,12 @@ fn handle_results_mode(app: &mut App, key: KeyEvent) -> InputAction {
             InputAction::None
         }
 
+        KeyCode::Left => {
+            // Switch to folders pane
+            app.focus = FocusPane::Folders;
+            InputAction::None
+        }
+
         KeyCode::Enter => InputAction::ResumeSelected,
 
         KeyCode::Up | KeyCode::Char('k') => {
@@ -163,7 +176,7 @@ fn handle_results_mode(app: &mut App, key: KeyEvent) -> InputAction {
         }
 
         KeyCode::Home => {
-            if !app.results.is_empty() {
+            if !app.filtered_indices.is_empty() {
                 app.selected_index = 0;
                 app.load_preview();
             }
@@ -171,10 +184,85 @@ fn handle_results_mode(app: &mut App, key: KeyEvent) -> InputAction {
         }
 
         KeyCode::End => {
-            if !app.results.is_empty() {
-                app.selected_index = app.results.len() - 1;
+            if !app.filtered_indices.is_empty() {
+                app.selected_index = app.filtered_indices.len() - 1;
                 app.load_preview();
             }
+            InputAction::None
+        }
+
+        KeyCode::Char(c) => {
+            // Printable char: switch to search mode and append
+            app.mode = AppMode::Search;
+            let byte_idx = app
+                .search_input
+                .char_indices()
+                .nth(app.cursor_position)
+                .map(|(i, _)| i)
+                .unwrap_or(app.search_input.len());
+            app.search_input.insert(byte_idx, c);
+            app.cursor_position += 1;
+            InputAction::SearchChanged
+        }
+
+        _ => InputAction::None,
+    }
+}
+
+fn handle_folders_mode(app: &mut App, key: KeyEvent) -> InputAction {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = AppMode::Search;
+            InputAction::None
+        }
+
+        KeyCode::Tab | KeyCode::Char('/') => {
+            app.mode = AppMode::Search;
+            InputAction::None
+        }
+
+        KeyCode::Right => {
+            // If on a folder with children, expand it. Otherwise switch to results pane.
+            let visible = app.folder_tree.visible_rows();
+            if app.folder_cursor > 0 {
+                if let Some(row) = visible.get(app.folder_cursor - 1) {
+                    if row.has_children && !row.expanded {
+                        app.folder_expand();
+                        return InputAction::None;
+                    }
+                }
+            }
+            app.focus = FocusPane::Results;
+            InputAction::None
+        }
+
+        KeyCode::Left => {
+            // If on an expanded folder, collapse it. Otherwise do nothing (already leftmost).
+            let visible = app.folder_tree.visible_rows();
+            if app.folder_cursor > 0 {
+                if let Some(row) = visible.get(app.folder_cursor - 1) {
+                    if row.expanded {
+                        app.folder_collapse();
+                        return InputAction::None;
+                    }
+                }
+            }
+            InputAction::None
+        }
+
+        KeyCode::Enter => {
+            // Set this folder as the active filter
+            app.set_folder_filter();
+            InputAction::None
+        }
+
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.folder_select_previous();
+            InputAction::None
+        }
+
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.folder_select_next();
             InputAction::None
         }
 
