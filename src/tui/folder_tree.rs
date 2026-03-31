@@ -126,7 +126,21 @@ impl FolderTree {
             }]
         };
 
-        FolderTree { roots, total_count }
+        let mut tree = FolderTree { roots, total_count };
+        tree.auto_expand();
+        tree
+    }
+
+    /// Auto-expand single-child chains so the user doesn't have to click
+    /// through a linear path to reach the first branching point.
+    fn auto_expand(&mut self) {
+        let single_root = self.roots.len() == 1;
+        for root in &mut self.roots {
+            if single_root && root.has_children {
+                root.expanded = true;
+            }
+            auto_expand_node(root);
+        }
     }
 
     /// Flatten the visible portion of the tree into rows for rendering.
@@ -272,6 +286,15 @@ fn flatten_node(
     }
 }
 
+/// Recursively expand nodes that have exactly one child — these form a
+/// linear chain where there's nothing to choose, so show them pre-expanded.
+fn auto_expand_node(node: &mut FolderNode) {
+    if node.children.len() == 1 {
+        node.children[0].expanded = node.children[0].has_children;
+        auto_expand_node(&mut node.children[0]);
+    }
+}
+
 /// Find the longest common directory prefix among a set of paths.
 fn longest_common_path_prefix(paths: &[&str]) -> String {
     if paths.is_empty() {
@@ -375,20 +398,20 @@ mod tests {
         ];
         let mut tree = FolderTree::build(&paths);
 
-        // Initially collapsed: only root visible.
+        // Single root X with 2 children: auto-expanded since it's the only root.
         let rows = tree.visible_rows();
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 3); // X, Z, Y (sorted by count)
         assert_eq!(rows[0].name, "X");
-
-        // Expand root.
-        tree.expand(&[0]);
-        let rows = tree.visible_rows();
-        assert_eq!(rows.len(), 3); // X, Y, Z
 
         // Collapse root.
         tree.collapse(&[0]);
         let rows = tree.visible_rows();
         assert_eq!(rows.len(), 1);
+
+        // Re-expand root.
+        tree.expand(&[0]);
+        let rows = tree.visible_rows();
+        assert_eq!(rows.len(), 3);
     }
 
     #[test]
@@ -401,6 +424,39 @@ mod tests {
         ];
         let tree = FolderTree::build(&paths);
         assert_eq!(tree.total_count, 2);
+    }
+
+    #[test]
+    fn test_auto_expand_single_child_chain() {
+        // /A has one child /A/B which has one child /A/B/C which has 2 children.
+        // The chain A -> B -> C should all be auto-expanded.
+        let paths = vec![
+            Some("/A/B/C/D".to_string()),
+            Some("/A/B/C/D".to_string()),
+            Some("/A/B/C/E".to_string()),
+        ];
+        let tree = FolderTree::build(&paths);
+        // Common prefix is /A/B/C, so root is "C" with children D and E.
+        // Single root → auto-expanded. 2 children → recursion stops.
+        let rows = tree.visible_rows();
+        // Should see: C, D, E (all visible without manual expanding)
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].name, "C");
+    }
+
+    #[test]
+    fn test_auto_expand_deep_single_chain() {
+        // All results in one folder: /X/Y/Z
+        // Plus some in /X/Y/Z/A — single root, single child chain.
+        let paths = vec![
+            Some("/X/Y/Z".to_string()),
+            Some("/X/Y/Z/A".to_string()),
+        ];
+        let tree = FolderTree::build(&paths);
+        // Common prefix = /X/Y/Z. Root = "Z" with one child "A".
+        // Single root → expanded. Single child → A also expanded (but A is a leaf).
+        let rows = tree.visible_rows();
+        assert_eq!(rows.len(), 2); // Z and A both visible
     }
 
     #[test]
