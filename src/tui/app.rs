@@ -39,6 +39,8 @@ pub struct App {
     search_generation: u64,
     search_rx: mpsc::UnboundedReceiver<SearchResponse>,
     search_tx: mpsc::UnboundedSender<SearchResponse>,
+    /// Handle to the in-flight search task. Aborted when a new search is spawned.
+    inflight_search: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +70,7 @@ impl App {
             search_generation: 0,
             search_rx,
             search_tx,
+            inflight_search: None,
         }
     }
 
@@ -96,9 +99,10 @@ impl App {
                 match response.result {
                     Ok(results) => {
                         tracing::debug!(
-                            "Got {} results in {:.1}s",
+                            "Got {} results in {:.3}s (gen={})",
                             results.len(),
-                            response.elapsed.as_secs_f64()
+                            response.elapsed.as_secs_f64(),
+                            response.generation,
                         );
                         self.result_count = results.len();
                         self.results = results;
@@ -167,6 +171,13 @@ impl App {
     }
 
     fn spawn_search(&mut self) {
+        // Abort any in-flight search so it doesn't queue up in QMD
+        // and block the new request.
+        if let Some(handle) = self.inflight_search.take() {
+            handle.abort();
+            tracing::debug!("Aborted in-flight search");
+        }
+
         let query = self.search_input.trim().to_string();
         let search_query = if query.is_empty() {
             "*".to_string()
@@ -180,7 +191,7 @@ impl App {
         let qmd = Arc::clone(&self.qmd);
         let tx = self.search_tx.clone();
 
-        tokio::spawn(async move {
+        self.inflight_search = Some(tokio::spawn(async move {
             let start = Instant::now();
             let result = qmd.search(&search_query, 20).await.map_err(|e| format!("{e}"));
             let _ = tx.send(SearchResponse {
@@ -188,7 +199,7 @@ impl App {
                 result,
                 elapsed: start.elapsed(),
             });
-        });
+        }));
     }
 
     pub fn load_preview(&mut self) {
