@@ -20,11 +20,13 @@ impl Config {
     pub fn load() -> Result<Self> {
         let claude_config_dir = Self::resolve_claude_dir()?;
 
-        // Place .ccresume as a sibling of the Claude config directory.
-        let parent = claude_config_dir
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Claude config dir has no parent: {}", claude_config_dir.display()))?;
-        let data_dir = parent.join(DATA_DIR_NAME);
+        // Always place .ccresume in the user's home directory so that data
+        // stays in one place regardless of CLAUDE_CONFIG_DIR (which may vary
+        // per-project via direnv). CLAUDE_CONFIG_DIR only affects where we
+        // read source session JSONLs from.
+        let home = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+        let data_dir = home.join(DATA_DIR_NAME);
 
         Ok(Self {
             claude_config_dir,
