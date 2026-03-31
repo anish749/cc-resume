@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -121,7 +121,7 @@ impl Config {
     }
 
     /// Register a Claude config directory in the persistent sources list.
-    fn register_source(&self, dir: &PathBuf) -> Result<()> {
+    fn register_source(&self, dir: &Path) -> Result<()> {
         std::fs::create_dir_all(&self.data_dir)?;
         let mut sources = self.load_sources();
         let canonical = dir.to_string_lossy().to_string();
