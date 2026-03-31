@@ -106,6 +106,16 @@ impl Config {
         self.data_dir.join("summaries")
     }
 
+    /// Path to the indexing lock file (present while pipeline is running).
+    pub fn indexing_lock_file(&self) -> PathBuf {
+        self.data_dir.join("indexing")
+    }
+
+    /// Whether the indexing pipeline is currently running.
+    pub fn is_indexing(&self) -> bool {
+        self.indexing_lock_file().exists()
+    }
+
     fn sources_file(&self) -> PathBuf {
         self.data_dir.join(SOURCES_FILE)
     }

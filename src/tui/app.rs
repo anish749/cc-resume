@@ -8,6 +8,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use crate::config::Config;
 use crate::exporter::markdown::SessionDocument;
 use crate::qmd::{QmdClient, SearchResult};
 
@@ -35,6 +36,11 @@ pub struct App {
     pub last_search_time: Option<Duration>,
     pub result_count: usize,
     pub preview_scroll: u16,
+
+    // Daemon status
+    pub config: Config,
+    pub daemon_status: String,
+    daemon_check_interval: Option<Instant>,
 
     // Folder sidebar state
     pub folder_tree: FolderTree,
@@ -68,8 +74,9 @@ pub enum FocusPane {
 }
 
 impl App {
-    pub fn new(qmd: QmdClient) -> Self {
+    pub fn new(qmd: QmdClient, config: Config) -> Self {
         let (search_tx, search_rx) = mpsc::unbounded_channel();
+        let daemon_status = Self::check_daemon_status(&config);
         Self {
             qmd: Arc::new(qmd),
             search_input: String::new(),
@@ -84,6 +91,9 @@ impl App {
             searching: false,
             last_search_time: None,
             result_count: 0,
+            config,
+            daemon_status,
+            daemon_check_interval: Some(Instant::now()),
             folder_tree: FolderTree::build(&[]),
             folder_cursor: 0,
             active_filter: None,
@@ -130,6 +140,14 @@ impl App {
                         self.selected_index = 0;
                         self.preview_content = None;
                     }
+                }
+            }
+
+            // Refresh daemon status every 30 seconds
+            if let Some(last_check) = self.daemon_check_interval {
+                if Instant::now().duration_since(last_check) >= Duration::from_secs(30) {
+                    self.daemon_status = Self::check_daemon_status(&self.config);
+                    self.daemon_check_interval = Some(Instant::now());
                 }
             }
 
@@ -349,5 +367,31 @@ impl App {
                 }
             }
         }
+    }
+
+    fn check_daemon_status(config: &Config) -> String {
+        let running = crate::watcher::is_running(config);
+
+        let session_count = std::fs::read_dir(config.export_dir())
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("md"))
+                    .count()
+            })
+            .unwrap_or(0);
+
+        let sources = config.claude_projects_dirs().len();
+
+        let daemon_label = if !running {
+            "○ daemon stopped"
+        } else if config.is_indexing() {
+            "● indexing…"
+        } else {
+            "● idle"
+        };
+        format!(
+            "{daemon_label} · {session_count} sessions · {sources} sources"
+        )
     }
 }

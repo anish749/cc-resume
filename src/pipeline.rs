@@ -13,6 +13,15 @@ use anyhow::Result;
 
 use crate::config::Config;
 
+/// RAII guard that removes the indexing lock file on drop.
+struct IndexingGuard<'a>(&'a Path);
+
+impl Drop for IndexingGuard<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+    }
+}
+
 /// A session whose source JSONL is newer than its exported markdown.
 struct StaleSession {
     jsonl_path: PathBuf,
@@ -41,6 +50,11 @@ pub async fn run(config: &Config) -> Result<usize> {
         return Ok(0);
     }
     tracing::info!("Found {} stale sessions across {} source dirs", stale.len(), projects_dirs.len());
+
+    // Signal that indexing is in progress.
+    let lock_file = config.indexing_lock_file();
+    let _ = std::fs::write(&lock_file, "");
+    let _guard = IndexingGuard(&lock_file);
 
     // Step 2: Export stale JSONLs to markdown (preserves existing AI summaries).
     let exported = export(config, &stale);
