@@ -87,23 +87,12 @@ impl App {
             // Collect completed search results (non-blocking)
             while let Ok(response) = self.search_rx.try_recv() {
                 if response.generation < self.search_generation {
-                    tracing::debug!(
-                        "Discarding stale result (gen {} < {})",
-                        response.generation,
-                        self.search_generation
-                    );
                     continue;
                 }
                 self.searching = false;
                 self.last_search_time = Some(response.elapsed);
                 match response.result {
                     Ok(results) => {
-                        tracing::debug!(
-                            "Got {} results in {:.3}s (gen={})",
-                            results.len(),
-                            response.elapsed.as_secs_f64(),
-                            response.generation,
-                        );
                         self.result_count = results.len();
                         self.results = results;
                         self.status_message = None;
