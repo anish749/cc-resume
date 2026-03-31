@@ -276,7 +276,7 @@ fn draw_results(f: &mut Frame, app: &App, area: Rect) {
             let date_str = result
                 .date
                 .as_deref()
-                .unwrap_or("???")
+                .unwrap_or("")
                 .chars()
                 .take(10)
                 .collect::<String>();
