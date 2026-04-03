@@ -14,15 +14,12 @@ pub async fn start(config: &Config) -> Result<()> {
 
     let data_dir = config.daemon_pid_file().parent().unwrap().to_path_buf();
     std::fs::create_dir_all(&data_dir)?;
-
-    let log_file = std::fs::File::create(config.daemon_log_file())
-        .context("Failed to create daemon log file")?;
-    let log_file_err = log_file.try_clone()?;
+    std::fs::create_dir_all(config.daemon_log_dir())?;
 
     let child = std::process::Command::new(std::env::current_exe()?)
         .arg("_watch")
-        .stdout(log_file)
-        .stderr(log_file_err)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .stdin(std::process::Stdio::null())
         .spawn()
         .context("Failed to spawn daemon process")?;
@@ -30,7 +27,7 @@ pub async fn start(config: &Config) -> Result<()> {
     let pid = child.id();
     std::fs::write(config.daemon_pid_file(), pid.to_string())?;
     println!("Daemon started (PID: {pid})");
-    println!("Log: {}", config.daemon_log_file().display());
+    println!("Logs: {}", config.daemon_log_dir().display());
 
     Ok(())
 }
@@ -74,7 +71,7 @@ pub fn status(config: &Config) -> Result<()> {
     match read_pid(config) {
         Some(pid) if process_alive(pid) => {
             println!("Daemon is running (PID: {pid})");
-            println!("Log: {}", config.daemon_log_file().display());
+            println!("Logs: {}", config.daemon_log_dir().display());
             print_summary_stats(config);
         }
         Some(pid) => {
