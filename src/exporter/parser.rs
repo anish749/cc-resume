@@ -32,6 +32,8 @@ pub struct SessionMetadata {
     pub files_touched: Vec<String>,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
+    /// Custom titles set by the user via `/rename`.
+    pub custom_titles: Vec<String>,
 }
 
 /// Intermediate parsed data from a JSONL file, carrying both the displayable
@@ -45,6 +47,8 @@ pub struct ParsedSession {
     pub git_branch: Option<String>,
     /// Unique file paths mentioned in tool_use content blocks.
     pub files_touched: Vec<String>,
+    /// Custom titles set by the user via `/rename` (from `custom-title` entries).
+    pub custom_titles: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +65,7 @@ pub fn parse_session(path: &Path) -> Result<ParsedSession> {
     let mut cwd: Option<String> = None;
     let mut git_branch: Option<String> = None;
     let mut files: BTreeSet<String> = BTreeSet::new();
+    let mut custom_titles: Vec<String> = Vec::new();
 
     for line_result in reader.lines() {
         let line = match line_result {
@@ -135,6 +140,14 @@ pub fn parse_session(path: &Path) -> Result<ParsedSession> {
                     });
                 }
             }
+            "custom-title" => {
+                if let Some(title) = value.get("customTitle").and_then(Value::as_str) {
+                    let t = title.trim().to_string();
+                    if !t.is_empty() && !custom_titles.contains(&t) {
+                        custom_titles.push(t);
+                    }
+                }
+            }
             // Skip everything else: system, progress, file-history-snapshot, etc.
             _ => {}
         }
@@ -145,6 +158,7 @@ pub fn parse_session(path: &Path) -> Result<ParsedSession> {
         cwd,
         git_branch,
         files_touched: files.into_iter().collect(),
+        custom_titles,
     })
 }
 
@@ -199,6 +213,7 @@ pub fn extract_metadata(
         files_touched: parsed.files_touched.clone(),
         started_at,
         ended_at,
+        custom_titles: parsed.custom_titles.clone(),
     }
 }
 

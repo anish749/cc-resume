@@ -21,6 +21,8 @@ pub(crate) struct Frontmatter {
     pub date: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_titles: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_prompt: Option<String>,
     // AI-generated summary fields (before files_touched for preview readability)
@@ -148,6 +150,7 @@ pub fn render(metadata: &SessionMetadata, messages: &[SessionMessage]) -> String
         project_path: metadata.project_path.clone(),
         date: metadata.date.clone(),
         git_branch: metadata.git_branch.clone(),
+        custom_titles: metadata.custom_titles.clone(),
         first_prompt: metadata.first_prompt.clone(),
         ai_summary: None,
         ai_topics: None,
@@ -244,6 +247,7 @@ mod tests {
             ],
             started_at: Some("2025-04-15T10:00:00Z".to_string()),
             ended_at: Some("2025-04-15T10:30:00Z".to_string()),
+            custom_titles: vec![],
         }
     }
 
@@ -500,6 +504,7 @@ mod tests {
                 files_touched: vec![],
                 started_at: None,
                 ended_at: None,
+                custom_titles: vec![],
             },
             &sample_messages(),
         );
