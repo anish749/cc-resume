@@ -96,9 +96,9 @@ impl Config {
         self.data_dir.join("daemon.pid")
     }
 
-    /// Path to the daemon log file.
-    pub fn daemon_log_file(&self) -> PathBuf {
-        self.data_dir.join("daemon.log")
+    /// Path to the daemon log directory (rolling log files).
+    pub fn daemon_log_dir(&self) -> PathBuf {
+        self.data_dir.join("logs")
     }
 
     /// Path to the summaries directory (YAML summary files).

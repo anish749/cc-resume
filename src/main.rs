@@ -18,10 +18,22 @@ async fn main() -> Result<()> {
     // Internal daemon command: runs the file watcher in foreground.
     // This is invoked by `daemon start` which re-execs with `_watch`.
     if std::env::args().nth(1).as_deref() == Some("_watch") {
+        let config = config::Config::load()?;
+        let log_dir = config.daemon_log_dir();
+        std::fs::create_dir_all(&log_dir)?;
+
+        let appender = tracing_appender::rolling::RollingFileAppender::builder()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix("daemon.log")
+            .max_log_files(7)
+            .build(&log_dir)?;
+
         tracing_subscriber::fmt()
             .with_env_filter("claude_resume=info")
+            .with_writer(appender)
+            .with_ansi(false)
             .init();
-        let config = config::Config::load()?;
+
         return watcher::run_watcher(&config).await;
     }
 

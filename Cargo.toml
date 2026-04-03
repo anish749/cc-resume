@@ -33,6 +33,7 @@ thiserror = "2"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # Unix process management
 libc = "0.2"
@@ -40,6 +41,7 @@ libc = "0.2"
 # Pin transitive deps that need newer rustc in latest versions
 instability = ">=0.3, <0.3.8"
 darling = ">=0.20, <0.21"
+time = ">=0.3, <0.3.42"
 
 # Misc
 dirs = "6"
