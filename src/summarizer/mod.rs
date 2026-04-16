@@ -308,7 +308,7 @@ async fn run_incremental_summary(
 /// Invoke `claude -p --model haiku` and return the raw output.
 async fn run_claude_cli(prompt: &str) -> Result<String> {
     let output = tokio::process::Command::new("claude")
-        .args(["-p", "--model", "haiku", "--output-format", "text", "--no-session-persistence"])
+        .args(["--bare", "-p", "--model", "haiku", "--output-format", "text", "--no-session-persistence", "--allowedTools", "Read"])
         .arg(prompt)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
