@@ -306,15 +306,25 @@ async fn run_incremental_summary(
 }
 
 /// Invoke `claude -p --model haiku` and return the raw output.
+/// The prompt is piped via stdin because `--allowedTools` consumes the
+/// positional argument that would otherwise carry the prompt.
 async fn run_claude_cli(prompt: &str) -> Result<String> {
-    let output = tokio::process::Command::new("claude")
-        .args(["--bare", "-p", "--model", "haiku", "--output-format", "text", "--no-session-persistence", "--allowedTools", "Read"])
-        .arg(prompt)
+    use tokio::io::AsyncWriteExt;
+
+    let mut child = tokio::process::Command::new("claude")
+        .args(["-p", "--model", "haiku", "--output-format", "text", "--no-session-persistence", "--allowedTools", "Read"])
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .output()
-        .await
+        .spawn()
         .context("Failed to run `claude` CLI. Is it installed and on PATH?")?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(prompt.as_bytes()).await?;
+        // Drop stdin to close it and signal EOF
+    }
+
+    let output = child.wait_with_output().await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
