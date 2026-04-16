@@ -255,7 +255,17 @@ pub async fn summarize_session(config: &Config, job: &SummarizeJob) -> Result<Se
         run_initial_summary(md_path).await?
     };
 
-    let parsed = parse_summary_yaml(&raw_yaml)?;
+    let parsed = match parse_summary_yaml(&raw_yaml) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                session_id,
+                raw_output = %raw_yaml,
+                "Failed to parse summary YAML: {e:#}"
+            );
+            return Err(e);
+        }
+    };
 
     Ok(SessionSummary {
         session_id: session_id.clone(),
@@ -459,7 +469,7 @@ pub async fn enqueue_pending(config: &Config, queue: &SummarizeQueue) -> Result<
     }
 
     // Sort newest first
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.0));
 
     let mut enqueued = 0;
     for (_mtime, session_id, path) in entries {
