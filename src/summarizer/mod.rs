@@ -469,7 +469,7 @@ pub async fn enqueue_pending(config: &Config, queue: &SummarizeQueue) -> Result<
     }
 
     // Sort newest first
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.0));
 
     let mut enqueued = 0;
     for (_mtime, session_id, path) in entries {
