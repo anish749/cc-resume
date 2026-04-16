@@ -255,7 +255,17 @@ pub async fn summarize_session(config: &Config, job: &SummarizeJob) -> Result<Se
         run_initial_summary(md_path).await?
     };
 
-    let parsed = parse_summary_yaml(&raw_yaml)?;
+    let parsed = match parse_summary_yaml(&raw_yaml) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                session_id,
+                raw_output = %raw_yaml,
+                "Failed to parse summary YAML: {e:#}"
+            );
+            return Err(e);
+        }
+    };
 
     Ok(SessionSummary {
         session_id: session_id.clone(),
