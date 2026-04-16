@@ -239,11 +239,17 @@ pub async fn summarize_session(config: &Config, job: &SummarizeJob) -> Result<Se
     let source_mtime = file_mtime_iso(md_path)?;
 
     let raw_yaml = if job.is_update {
-        // Incremental: pass previous summary + new messages
         let existing = read_summary(config, session_id)
             .ok_or_else(|| anyhow::anyhow!("Expected existing summary for update"))?;
-        let delta_messages = extract_messages_after(&md_content, existing.message_count);
-        run_incremental_summary(&existing, &delta_messages).await?
+        let delta = message_count.saturating_sub(existing.message_count);
+        if delta <= 20 {
+            // Incremental: pass previous summary + new messages
+            let delta_messages = extract_messages_after(&md_content, existing.message_count);
+            run_incremental_summary(&existing, &delta_messages).await?
+        } else {
+            // Delta too large — full re-summarization is cheaper and more reliable
+            run_initial_summary(md_path).await?
+        }
     } else {
         // Initial: pass file path, let Claude read it
         run_initial_summary(md_path).await?
