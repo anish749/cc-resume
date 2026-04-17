@@ -354,10 +354,51 @@ struct ParsedSummaryResponse {
 }
 
 /// Parse the YAML response from Claude, stripping markdown fences if present.
+/// Falls back to lenient parsing when topics contain unquoted colons that
+/// the YAML parser interprets as maps instead of strings.
 fn parse_summary_yaml(raw: &str) -> Result<ParsedSummaryResponse> {
     let cleaned = strip_yaml_fences(raw);
-    serde_yml::from_str(&cleaned)
-        .context("Failed to parse summary YAML from Claude CLI output")
+
+    // Fast path: strict parse
+    if let Ok(parsed) = serde_yml::from_str::<ParsedSummaryResponse>(&cleaned) {
+        return Ok(parsed);
+    }
+
+    // Lenient path: parse as generic Value and coerce topic maps to strings
+    tracing::debug!("Strict YAML parse failed, attempting lenient coercion");
+    let mut value: serde_yml::Value = serde_yml::from_str(&cleaned)
+        .context("Failed to parse summary YAML from Claude CLI output")?;
+
+    if let Some(topics) = value.get_mut("topics").and_then(|t| t.as_sequence_mut()) {
+        for entry in topics.iter_mut() {
+            if let serde_yml::Value::Mapping(map) = entry.clone() {
+                // Flatten "key: value" map entries back into a single string
+                let parts: Vec<String> = map
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let ks = yaml_value_to_string(&k);
+                        let vs = yaml_value_to_string(&v);
+                        format!("{ks}: {vs}")
+                    })
+                    .collect();
+                *entry = serde_yml::Value::String(parts.join("; "));
+            }
+        }
+    }
+
+    serde_yml::from_value(value)
+        .context("Failed to parse summary YAML from Claude CLI output (lenient)")
+}
+
+/// Best-effort conversion of a YAML value to a plain string.
+fn yaml_value_to_string(v: &serde_yml::Value) -> String {
+    match v {
+        serde_yml::Value::String(s) => s.clone(),
+        serde_yml::Value::Number(n) => n.to_string(),
+        serde_yml::Value::Bool(b) => b.to_string(),
+        serde_yml::Value::Null => String::new(),
+        other => format!("{other:?}"),
+    }
 }
 
 /// Extract YAML from a response that may contain prose and/or ``` fences.
@@ -633,5 +674,18 @@ mod tests {
     #[test]
     fn parse_summary_yaml_invalid() {
         assert!(parse_summary_yaml("not: valid: yaml: [[[").is_err());
+    }
+
+    #[test]
+    fn parse_summary_yaml_coerces_map_topics_to_strings() {
+        // Haiku sometimes returns unquoted strings containing colons,
+        // which the YAML parser interprets as maps.
+        let yaml = "topics:\n  - Simple topic\n  - thinking.type: enabled (manual with budget_tokens cap)\n  - Another plain topic\nsummary: Sum\nintent: feature";
+        let result = parse_summary_yaml(yaml).unwrap();
+        assert_eq!(result.topics.len(), 3);
+        assert_eq!(result.topics[0], "Simple topic");
+        assert!(result.topics[1].contains("thinking.type"));
+        assert!(result.topics[1].contains("enabled"));
+        assert_eq!(result.topics[2], "Another plain topic");
     }
 }
